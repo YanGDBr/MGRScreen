@@ -14,6 +14,7 @@ A [licença MIT](LICENSE) se aplica ao código do MGRScreen. As dependências ma
 | Okio, JetBrains Annotations e Guava ListenableFuture | Dependências do Android | [Okio](https://github.com/square/okio/blob/3.4.0/LICENSE.txt), [JetBrains Annotations](https://github.com/JetBrains/java-annotations/blob/master/LICENSE.txt) e [Guava](https://github.com/google/guava/blob/master/COPYING) |
 | Protocol Buffers | Código incluído no DataStore Android | [BSD 3-Clause](licenses/Protobuf-BSD-3-Clause.txt) |
 | Gradle Wrapper | Compilação do Android | [Apache 2.0](https://github.com/gradle/gradle/blob/v8.9.0/LICENSE) |
-| FFmpeg | Processo externo instalado separadamente no Windows | [Licenciamento do FFmpeg](https://www.ffmpeg.org/legal.html) |
+| FFmpeg, x264, NVENC, AMF e Intel VPL | Processo externo incluído nos pacotes Windows | [Licenciamento do FFmpeg](https://ffmpeg.org/legal.html) · [Código-fonte correspondente e script de compilação](https://github.com/YanGDBr/MGRScreen/releases/download/v1.0.0/MGRScreen-1.0.0-ffmpeg-source.zip) |
+| Inno Setup | Instalador Windows | [Licença do Inno Setup](https://github.com/jrsoftware/issrc/blob/is-7_1_1/license.txt) |
 
 Os textos de licença acompanham as distribuições. A licença [Apache 2.0](licenses/Apache-2.0.txt) também está disponível no repositório.

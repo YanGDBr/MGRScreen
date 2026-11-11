@@ -14,10 +14,11 @@
 
 ## Instalação e uso
 
-Baixe o pacote **Windows x64** ou o **APK para Android 10+** na [release v1.0.0](https://github.com/YanGDBr/MGRScreen/releases/tag/v1.0.0).
+Encontre todos os arquivos na [release v1.0.0](https://github.com/YanGDBr/MGRScreen/releases/tag/v1.0.0).
 
-- **Windows** — instale o [FFmpeg Essentials](https://www.gyan.dev/ffmpeg/builds/) com `winget install --id Gyan.FFmpeg.Essentials -e`. Extraia o ZIP inteiro, abra `MGRScreen.exe` e crie ou entre em uma sala. Participantes no Windows podem transmitir tela, áudio e câmera.
-- **Android** — instale o APK, informe um apelido e escolha uma sala para assistir. O player tem tela cheia, orientação e controles de volume.
+- **Windows x64, instalador** — baixe e execute o [instalador .exe](https://github.com/YanGDBr/MGRScreen/releases/download/v1.0.0/MGRScreen-1.0.0-windows-x64-setup.exe). Depois, abra o MGRScreen pelo menu Iniciar.
+- **Windows x64, portátil** — baixe o [ZIP portátil](https://github.com/YanGDBr/MGRScreen/releases/download/v1.0.0/MGRScreen-1.0.0-windows-x64.zip), extraia a pasta inteira e abra `MGRScreen.exe`. Os dois pacotes Windows já incluem FFmpeg e .NET.
+- **Android 10+** — instale o [APK](https://github.com/YanGDBr/MGRScreen/releases/download/v1.0.0/MGRScreen-Viewer-1.0.0.apk), informe um apelido e escolha uma sala para assistir. O player tem tela cheia, orientação e controles de volume.
 
 Use a mesma rede local ou conecte os dispositivos ao Tailscale. As salas aparecem na busca automática e também podem ser abertas pelo IP ou nome do anfitrião. [Guia do Android](docs/ANDROID_VIEWER.md)
 
@@ -39,6 +40,6 @@ cd android
 .\gradlew.bat assembleDebug testDebugUnitTest
 ```
 
-O código Windows está em `src/`, o visualizador em `android/` e o teste de integração em `tests/`. [Arquitetura](docs/ARCHITECTURE.md) · [Protocolo de rede](docs/PROTOCOL_V2.md)
+O código Windows está em `src/`, o visualizador em `android/` e o teste de integração em `tests/`. [Arquitetura](docs/ARCHITECTURE.md) · [Protocolo de rede](docs/PROTOCOL_V2.md) · [Empacotamento Windows](packaging/windows/README.md)
 
 O código do MGRScreen é licenciado sob MIT. Consulte os [avisos de terceiros](THIRD_PARTY_NOTICES.md) para as dependências distribuídas.

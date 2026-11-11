@@ -13,7 +13,7 @@ public static class FfmpegLocator
 
     public static string FindFfmpegExecutable()
     {
-        // 1) Instalação manual do FFmpeg na pasta "ffmpeg" ao lado do aplicativo.
+        // 1) FFmpeg distribuído na pasta "ffmpeg" ao lado do aplicativo.
         var bundled = Path.Combine(AppContext.BaseDirectory, "ffmpeg", "ffmpeg.exe");
         if (File.Exists(bundled))
         {
