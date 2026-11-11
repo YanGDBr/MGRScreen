@@ -124,6 +124,16 @@ public sealed class FfmpegEncoder : IDisposable
             // fast_bilinear borra texto a ponto de atrapalhar a leitura, e o custo extra do
             // bicubic é pequeno perto do resto do pipeline.
             sb.Append($"-vf scale={_settings.OutputWidth}:{_settings.OutputHeight} -sws_flags bicubic ");
+
+            // Os encoders de hardware aceitam BGRA direto, então sem isto o swscale reduz
+            // BGRA -> BGRA (4 canais em resolução cheia). Pedindo NV12 ele reduz e converte num
+            // passo só. Medido em 1440p -> 1080p com NVENC: ~80 ms de CPU por frame viram ~29 ms.
+            // Só vale quando há redução: sem ela o encoder converte o BGRA na própria GPU.
+            // (O libx264 já pede yuv420p nos argumentos dele.)
+            if (_settings.VideoEncoder != "libx264")
+            {
+                sb.Append("-pix_fmt nv12 ");
+            }
         }
 
         sb.Append(BuildVideoEncoderArgs());

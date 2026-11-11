@@ -95,7 +95,13 @@ public sealed class FfmpegDecoder : IDisposable
         _process = Process.Start(psi) ?? throw new InvalidOperationException("Falha ao iniciar ffmpeg.exe");
 
         Task.Run(() => PumpStdErrAsync(_cts.Token));
-        _stdoutTask = Task.Run(() => PumpVideoAsync(_cts.Token));
+        var process = _process;
+        var token = _cts.Token;
+        _stdoutTask = Task.Factory.StartNew(
+            () => PumpVideo(process, token),
+            CancellationToken.None,
+            TaskCreationOptions.LongRunning,
+            TaskScheduler.Default);
         Task.Run(() => WriteLoopAsync(_cts.Token));
     }
 
@@ -158,17 +164,25 @@ public sealed class FfmpegDecoder : IDisposable
         }
     }
 
-    private async Task PumpVideoAsync(CancellationToken token)
+    /// <summary>
+    /// Lê os frames BGRA do stdout do ffmpeg numa thread dedicada, com leitura SÍNCRONA. O pipe
+    /// entrega cada frame de 1080p em ~250 pedaços de ~32 KB; com `ReadAsync` cada pedaço passava
+    /// pelo thread pool, e isso sozinho custava ~9 ms de CPU por frame (medido) contra ~4 ms assim.
+    /// Não precisa de cancelamento: parar o decoder fecha/mata o ffmpeg, o pipe dá EOF e a
+    /// leitura retorna.
+    /// </summary>
+    private void PumpVideo(Process process, CancellationToken token)
     {
         var frameSize = _width * _height * 4;
         var frameBuffer = new byte[frameSize];
-        var stream = _process!.StandardOutput.BaseStream;
 
         try
         {
+            var stream = process.StandardOutput.BaseStream;
+
             while (!token.IsCancellationRequested)
             {
-                if (!await ReadExactAsync(stream, frameBuffer, frameSize, token))
+                if (!ReadExact(stream, frameBuffer, frameSize))
                 {
                     break; // ffmpeg encerrou / fechou o stdout
                 }
@@ -177,8 +191,9 @@ public sealed class FfmpegDecoder : IDisposable
                 FrameDecoded?.Invoke(new DecodedFrame { Data = frameBuffer, Width = _width, Height = _height });
             }
         }
-        catch (OperationCanceledException)
+        catch (Exception ex) when (ex is IOException or ObjectDisposedException or InvalidOperationException)
         {
+            // Pipe fechado no meio de uma leitura: é o que acontece ao parar o decoder.
         }
         catch (Exception ex)
         {
@@ -186,12 +201,12 @@ public sealed class FfmpegDecoder : IDisposable
         }
     }
 
-    private static async Task<bool> ReadExactAsync(Stream stream, byte[] buffer, int count, CancellationToken token)
+    private static bool ReadExact(Stream stream, byte[] buffer, int count)
     {
         var offset = 0;
         while (offset < count)
         {
-            var read = await stream.ReadAsync(buffer.AsMemory(offset, count - offset), token);
+            var read = stream.Read(buffer, offset, count - offset);
             if (read == 0)
             {
                 return false;
