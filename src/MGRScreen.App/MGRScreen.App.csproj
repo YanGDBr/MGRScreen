@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows10.0.22621.0</TargetFramework>
+    <SupportedOSPlatformVersion>10.0.19041.0</SupportedOSPlatformVersion>
+    <Platforms>x64</Platforms>
+    <RootNamespace>MGRScreen.App</RootNamespace>
+    <AssemblyName>MGRScreen</AssemblyName>
+    <Version>1.0.0</Version>
+    <UseWPF>true</UseWPF>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+
+    <!-- Ícone do próprio .exe (o que aparece no Explorer e na barra de tarefas). -->
+    <ApplicationIcon>Assets\mgrscreen.ico</ApplicationIcon>
+
+    <!-- Corta os assemblies satélite de outros idiomas (recursos de erro/UI do próprio .NET
+         traduzidos pra alemão, japonês, etc.) do build self-contained — não usamos, e cada um
+         soma alguns MB. Sem efeito nas mensagens do NOSSO app, só nas do runtime/WPF. -->
+    <SatelliteResourceLanguages>pt-BR</SatelliteResourceLanguages>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\MGRScreen.Core\MGRScreen.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Usado dentro do app (logo nas telas e ícone das janelas). -->
+    <Resource Include="Assets\mgrscreen.png" />
+  </ItemGroup>
+
+</Project>

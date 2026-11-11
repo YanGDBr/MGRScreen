@@ -1,0 +1,35 @@
+# Build output
+bin/
+obj/
+/publish/
+/out/
+*.apk
+*.aab
+*.apks
+*.idsig
+
+# FFmpeg binaries (grandes demais pra versionar — ver tools/ffmpeg/README.md)
+/tools/ffmpeg/*
+!/tools/ffmpeg/README.md
+
+# Visual Studio / Rider
+.vs/
+.idea/
+*.user
+
+# Android SDK, Gradle and signing
+.android-tools/
+/.gradle/
+/android/.gradle/
+/android/.kotlin/
+/android/**/build/
+/android/local.properties
+*.jks
+*.keystore
+*.p12
+*.pfx
+keystore.properties
+key.properties
+.env
+.env.*
+!.env.example

@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- TFM em 22621 pra ter acesso a GraphicsCaptureSession.IsBorderRequired (remove a borda
+         amarela do Windows durante a captura) — API só existe no Windows 11. O
+         SupportedOSPlatformVersion continua em 19041 pra continuar rodando no Windows 10, e o
+         código guarda a chamada com try/catch. -->
+    <TargetFramework>net8.0-windows10.0.22621.0</TargetFramework>
+    <SupportedOSPlatformVersion>10.0.19041.0</SupportedOSPlatformVersion>
+    <Platforms>x64</Platforms>
+    <RootNamespace>MGRScreen.Core</RootNamespace>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!-- Necessário para o compilador gerar as projeções CsWinRT de Windows.Graphics.Capture
+         (WGC) automaticamente a partir do TFM acima, sem precisar de pacote NuGet extra. -->
+    <CsWinRTIncludes>Windows.Graphics.Capture;Windows.Graphics.DirectX;Windows.Graphics.DirectX.Direct3D11</CsWinRTIncludes>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Vortice.Direct3D11" Version="3.8.3" />
+    <PackageReference Include="Vortice.DXGI" Version="3.8.3" />
+    <PackageReference Include="NAudio" Version="2.2.1" />
+  </ItemGroup>
+
+</Project>
