@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using MGRScreen.Core.Models;
 using Vortice.Direct3D11;
 using Windows.Graphics.Capture;
 using Windows.Graphics.DirectX;
@@ -16,6 +17,13 @@ public readonly struct CapturedFrame
     public required byte[] Data { get; init; }
     public required int Width { get; init; }
     public required int Height { get; init; }
+    public FramePixelFormat Format { get; init; }
+
+    /// <summary>Tamanho original do que foi capturado, quando o frame já chega reduzido
+    /// (captura de tela em NV12). 0 quando <see cref="Width"/>/<see cref="Height"/> já são o
+    /// tamanho original.</summary>
+    public int SourceWidth { get; init; }
+    public int SourceHeight { get; init; }
 }
 
 /// <summary>
@@ -35,6 +43,21 @@ public sealed class ScreenCaptureService : IDisposable
     /// </summary>
     private volatile int _targetFps = 60;
     public int TargetFps { get => _targetFps; set => _targetFps = value; }
+
+    /// <summary>
+    /// Altura máxima do que é entregue. Telas maiores (1440p, 4K) são reduzidas NA GPU, junto com
+    /// a conversão pra NV12, antes de qualquer byte vir pra CPU. Pode mudar durante a captura.
+    /// </summary>
+    private volatile int _maxOutputHeight = 1080;
+    public int MaxOutputHeight { get => _maxOutputHeight; set => _maxOutputHeight = value; }
+
+    /// <summary>Se a conversão na GPU falhar nesta máquina, a captura volta a entregar BGRA no
+    /// tamanho original (o caminho antigo) e avisa por aqui o motivo, uma vez.</summary>
+    public event Action<string>? GpuConversionUnavailable;
+
+    private GpuNv12Converter? _converter;
+    private bool _gpuConversionFailed;
+    private byte[]? _nv12Buffer;
 
     private ID3D11Device? _d3dDevice;
     private ID3D11DeviceContext? _d3dContext;
@@ -127,7 +150,8 @@ public sealed class ScreenCaptureService : IDisposable
 
         try
         {
-            _session.IsCursorCaptureEnabled = false; // não queremos o cursor do mouse no stream
+            // Com o cursor: quem assiste precisa ver pra onde a pessoa está apontando.
+            _session.IsCursorCaptureEnabled = true;
         }
         catch
         {
@@ -190,15 +214,58 @@ public sealed class ScreenCaptureService : IDisposable
                 2,
                 frame.ContentSize);
 
+            // Só o caminho BGRA (sem conversão na GPU) usa estes dois; são criados quando preciso.
             _stagingTexture?.Dispose();
-            _stagingTexture = CreateStagingTexture(width, height);
-            _frameBuffer = new byte[width * height * 4];
+            _stagingTexture = null;
+            _frameBuffer = null;
             _stagingWidth = width;
             _stagingHeight = height;
         }
 
         using var sourceTexture = Direct3D11Helpers.GetTexture2DFromSurface(frame.Surface);
-        _d3dContext!.CopySubresourceRegion(_stagingTexture!, 0, 0, 0, 0, sourceTexture, 0, null);
+
+        if (!_gpuConversionFailed)
+        {
+            var (outWidth, outHeight) = SessionSettings.ScaleToHeight(width, height, MaxOutputHeight);
+            var converted = false;
+            try
+            {
+                var size = FrameLayout.ByteCount(FramePixelFormat.Nv12, outWidth, outHeight);
+                if (_nv12Buffer is null || _nv12Buffer.Length != size)
+                {
+                    _nv12Buffer = new byte[size];
+                }
+
+                _converter ??= new GpuNv12Converter(_d3dDevice!, _d3dContext!);
+                _converter.Convert(sourceTexture, width, height, outWidth, outHeight, _nv12Buffer);
+                converted = true;
+            }
+            catch (Exception ex) when (ex is not OutOfMemoryException)
+            {
+                _gpuConversionFailed = true;
+                _converter?.Dispose();
+                _converter = null;
+                GpuConversionUnavailable?.Invoke(ex.Message);
+            }
+
+            if (converted)
+            {
+                FrameCaptured?.Invoke(new CapturedFrame
+                {
+                    Data = _nv12Buffer!,
+                    Width = outWidth,
+                    Height = outHeight,
+                    Format = FramePixelFormat.Nv12,
+                    SourceWidth = width,
+                    SourceHeight = height,
+                });
+                return;
+            }
+        }
+
+        _stagingTexture ??= CreateStagingTexture(width, height);
+        _frameBuffer ??= new byte[width * height * 4];
+        _d3dContext!.CopySubresourceRegion(_stagingTexture, 0, 0, 0, 0, sourceTexture, 0, null);
 
         var mapped = _d3dContext.Map(_stagingTexture!, 0, MapMode.Read, Vortice.Direct3D11.MapFlags.None);
         try
@@ -260,6 +327,10 @@ public sealed class ScreenCaptureService : IDisposable
             _framePool.Dispose();
             _framePool = null;
         }
+
+        _converter?.Dispose();
+        _converter = null;
+        _nv12Buffer = null;
 
         _stagingTexture?.Dispose();
         _stagingTexture = null;

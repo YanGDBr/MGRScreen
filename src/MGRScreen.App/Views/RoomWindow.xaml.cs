@@ -56,9 +56,14 @@ public partial class RoomWindow : Window
     /// <summary>O que eu anunciei estar transmitindo, pra reanunciar depois de reconectar.</summary>
     private StreamInfo? _myStreamInfo;
 
-    /// <summary>Tamanho do que estou capturando, pra conseguir reiniciar o encoder na hora.</summary>
+    /// <summary>Tamanho original do que estou capturando e formato/tamanho dos frames que vão pro
+    /// encoder, pra conseguir reiniciar o encoder na hora.</summary>
     private int _captureWidth;
     private int _captureHeight;
+    private int _encodeWidth;
+    private int _encodeHeight;
+    private FramePixelFormat _encodeFormat;
+    private int _screenRestartPending;
     private FfmpegEncoder? _encoder;
 
     // ConcurrentDictionary e não Dictionary: a thread de rede lê isto a cada chunk recebido
@@ -131,6 +136,12 @@ public partial class RoomWindow : Window
 
         RestorePreferences();
         _audioMixer.Start();
+
+        // Põe os frames na tela no ritmo do monitor (ver OnCompositionRendering).
+        CompositionTarget.Rendering += OnCompositionRendering;
+
+        _capture.GpuConversionUnavailable += reason => Dispatcher.BeginInvoke(() =>
+            StatusText.Text = $"Conversão de vídeo na placa indisponível ({reason}); usando o processador.");
 
         _camera.FrameCaptured += OnCameraFrame;
         _camera.Failed += message => Dispatcher.BeginInvoke(() =>
@@ -415,6 +426,7 @@ public partial class RoomWindow : Window
         try
         {
             _capture.TargetFps = QualityCombo.SelectedIndex is 1 or 2 ? 60 : 30;
+            _capture.MaxOutputHeight = SelectedMaxHeight;
             _capture.FrameCaptured += OnLocalFrameCaptured;
             _waitingForFirstFrame = true;
 
@@ -450,10 +462,25 @@ public partial class RoomWindow : Window
 
     private void OnLocalFrameCaptured(CapturedFrame frame)
     {
+        // A captura normalmente já entrega NV12 reduzido na GPU; o tamanho original vem à parte.
+        var sourceWidth = frame.SourceWidth > 0 ? frame.SourceWidth : frame.Width;
+        var sourceHeight = frame.SourceHeight > 0 ? frame.SourceHeight : frame.Height;
+        var width = frame.Width;
+        var height = frame.Height;
+        var format = frame.Format;
+
+        // Logo depois de trocar a qualidade ainda pode chegar um frame convertido no tamanho
+        // antigo. Ele não serve pro encoder novo, e não é motivo pra reiniciar de novo.
+        if (format == FramePixelFormat.Nv12 &&
+            SessionSettings.ScaleToHeight(sourceWidth, sourceHeight, _capture.MaxOutputHeight) != (width, height))
+        {
+            return;
+        }
+
         if (_waitingForFirstFrame)
         {
             _waitingForFirstFrame = false;
-            Dispatcher.BeginInvoke(() => BeginStreaming(frame.Width, frame.Height));
+            Dispatcher.BeginInvoke(() => BeginStreaming(width, height, format, sourceWidth, sourceHeight));
         }
 
         var encoder = _encoder;
@@ -464,9 +491,13 @@ public partial class RoomWindow : Window
             // iniciado com `-s LARGURAxALTURA` fixo, então continuar enviando frames de outro
             // tamanho produz um stream desalinhado: quem assiste vê tela preta/lixo, enquanto o
             // preview local de quem compartilha continua perfeito (ele usa o tamanho do frame).
-            if (frame.Width != encoder.InputWidth || frame.Height != encoder.InputHeight)
+            // A flag evita enfileirar um reinício por frame até o primeiro ser processado.
+            if (width != encoder.InputWidth || height != encoder.InputHeight || format != encoder.InputFormat)
             {
-                Dispatcher.BeginInvoke(() => RestartStreamingForNewSize(frame.Width, frame.Height));
+                if (Interlocked.Exchange(ref _screenRestartPending, 1) == 0)
+                {
+                    Dispatcher.BeginInvoke(() => RestartStreamingForNewSize(width, height, format, sourceWidth, sourceHeight));
+                }
                 return;
             }
 
@@ -480,24 +511,41 @@ public partial class RoomWindow : Window
         if (_isSharing && now - _lastBlackCheckTick >= 1000)
         {
             _lastBlackCheckTick = now;
-            _lastCapturedFrameWasBlack = IsMostlyBlack(frame.Data);
+            _lastCapturedFrameWasBlack = IsMostlyBlack(frame.Data, width, height, format);
         }
 
         if (_tiles.TryGetValue(LocalTileId, out var tile) && tile.Watching)
         {
-            PushFrameToTile(tile, frame.Data, frame.Width, frame.Height);
+            PushFrameToTile(tile, frame.Data, width, height, format);
         }
     }
 
-    /// <summary>Amostra ~400 pixels espalhados em vez de varrer os 8 MB do frame.</summary>
-    private static bool IsMostlyBlack(byte[] bgra)
+    /// <summary>Amostra ~400 pixels espalhados em vez de varrer o frame inteiro.</summary>
+    private static bool IsMostlyBlack(byte[] data, int width, int height, FramePixelFormat format)
     {
         const int samples = 400;
-        var step = Math.Max(4, bgra.Length / samples / 4 * 4);
 
-        for (var i = 0; i + 2 < bgra.Length; i += step)
+        if (format != FramePixelFormat.Bgra)
         {
-            if (bgra[i] > 12 || bgra[i + 1] > 12 || bgra[i + 2] > 12)
+            // Só o plano Y (brilho). Preto em faixa limitada é 16; 28 dá a mesma folga do BGRA.
+            var luma = width * height;
+            var lumaStep = Math.Max(1, luma / samples);
+            for (var i = 0; i < luma; i += lumaStep)
+            {
+                if (data[i] > 28)
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        var step = Math.Max(4, data.Length / samples / 4 * 4);
+
+        for (var i = 0; i + 2 < data.Length; i += step)
+        {
+            if (data[i] > 12 || data[i + 1] > 12 || data[i + 2] > 12)
             {
                 return false;
             }
@@ -506,15 +554,22 @@ public partial class RoomWindow : Window
         return true;
     }
 
-    private void BeginStreaming(int width, int height)
-    {
-        _captureWidth = width;
-        _captureHeight = height;
+    /// <summary>Altura máxima do preset escolhido (UI thread).
+    /// 0 = 1080p30 · 1 = 1080p60 · 2 = 720p60 · 3 = 720p30</summary>
+    private int SelectedMaxHeight => QualityCombo.SelectedIndex >= 2 ? 720 : 1080;
 
-        // 0 = 1080p30 · 1 = 1080p60 · 2 = 720p60 · 3 = 720p30
+    /// <param name="width">Tamanho dos frames que a captura entrega ao encoder.</param>
+    /// <param name="sourceWidth">Tamanho original da tela/janela capturada.</param>
+    private void BeginStreaming(int width, int height, FramePixelFormat format, int sourceWidth, int sourceHeight)
+    {
+        _captureWidth = sourceWidth;
+        _captureHeight = sourceHeight;
+        _encodeWidth = width;
+        _encodeHeight = height;
+        _encodeFormat = format;
+
         var quality = QualityCombo.SelectedIndex;
         var fps = quality is 1 or 2 ? 60 : 30;
-        var maxHeight = quality >= 2 ? 720 : 1080;
         var bitrate = quality switch
         {
             1 => 12_000, // 1080p60
@@ -523,12 +578,17 @@ public partial class RoomWindow : Window
             _ => 8_000,  // 1080p30
         };
 
-        var (outWidth, outHeight) = SessionSettings.ScaleToHeight(width, height, maxHeight);
+        // NV12 já chega no tamanho final (reduzido na GPU). Só o caminho BGRA, usado quando a
+        // conversão na GPU não está disponível, ainda deixa a redução pro ffmpeg.
+        var (outWidth, outHeight) = format == FramePixelFormat.Bgra
+            ? SessionSettings.ScaleToHeight(width, height, SelectedMaxHeight)
+            : (width, height);
 
         var settings = new SessionSettings
         {
             Width = width,
             Height = height,
+            InputFormat = format,
             OutputWidth = outWidth,
             OutputHeight = outHeight,
             Fps = fps,
@@ -540,7 +600,7 @@ public partial class RoomWindow : Window
 
         _encoder = new FfmpegEncoder(settings, _ffmpegPath);
         _encoder.FfmpegLogLine += line => Dispatcher.BeginInvoke(() => StatusText.Text = $"[ffmpeg] {line}");
-        _encoder.Exited += code => Dispatcher.BeginInvoke(() => OnEncoderExited(code, width, height));
+        _encoder.Exited += code => Dispatcher.BeginInvoke(() => OnEncoderExited(code));
         _encoder.StartToStream();
 
         _myStreamInfo = new StreamInfo
@@ -572,9 +632,9 @@ public partial class RoomWindow : Window
         }
 
         UpdateParticipantsLabel();
-        StatusText.Text = outWidth == width
-            ? $"Compartilhando {width}x{height} a {fps} fps."
-            : $"Compartilhando {width}x{height} reduzido para {outWidth}x{outHeight} a {fps} fps.";
+        StatusText.Text = outWidth == sourceWidth && outHeight == sourceHeight
+            ? $"Compartilhando {sourceWidth}x{sourceHeight} a {fps} fps."
+            : $"Compartilhando {sourceWidth}x{sourceHeight} reduzido para {outWidth}x{outHeight} a {fps} fps.";
     }
 
     /// <summary>A tela mudou de tamanho no meio da transmissão: recria o encoder no novo tamanho
@@ -589,33 +649,46 @@ public partial class RoomWindow : Window
 
         StatusText.Text = "Trocando a qualidade da transmissão...";
 
-        // A captura é lida a cada frame, então mudar aqui vale imediatamente.
+        // A captura lê os dois a cada frame, então mudar aqui vale imediatamente.
         _capture.TargetFps = QualityCombo.SelectedIndex is 1 or 2 ? 60 : 30;
+        _capture.MaxOutputHeight = SelectedMaxHeight;
 
         _encoder?.Stop();
         _encoder = null;
 
         RemoveTile(LocalTileId);
-        BeginStreaming(_captureWidth, _captureHeight);
+
+        if (_encodeFormat == FramePixelFormat.Bgra)
+        {
+            BeginStreaming(_captureWidth, _captureHeight, _encodeFormat, _captureWidth, _captureHeight);
+        }
+        else
+        {
+            // O tamanho que a captura vai passar a entregar com o novo teto de altura.
+            var (width, height) = SessionSettings.ScaleToHeight(_captureWidth, _captureHeight, SelectedMaxHeight);
+            BeginStreaming(width, height, _encodeFormat, _captureWidth, _captureHeight);
+        }
     }
 
-    private void RestartStreamingForNewSize(int width, int height)
+    private void RestartStreamingForNewSize(int width, int height, FramePixelFormat format, int sourceWidth, int sourceHeight)
     {
+        Interlocked.Exchange(ref _screenRestartPending, 0);
+
         if (!_isSharing)
         {
             return;
         }
 
-        StatusText.Text = $"A resolução mudou para {width}x{height}, reiniciando a transmissão...";
+        StatusText.Text = $"A resolução mudou para {sourceWidth}x{sourceHeight}, reiniciando a transmissão...";
 
         _encoder?.Stop();
         _encoder = null;
 
         RemoveTile(LocalTileId);
-        BeginStreaming(width, height);
+        BeginStreaming(width, height, format, sourceWidth, sourceHeight);
     }
 
-    private void OnEncoderExited(int exitCode, int width, int height)
+    private void OnEncoderExited(int exitCode)
     {
         if (!_isSharing)
         {
@@ -632,7 +705,7 @@ public partial class RoomWindow : Window
             _encoder?.Stop();
             _encoder = null;
             RemoveTile(LocalTileId);
-            BeginStreaming(width, height);
+            BeginStreaming(_encodeWidth, _encodeHeight, _encodeFormat, _captureWidth, _captureHeight);
             return;
         }
 
@@ -870,7 +943,7 @@ public partial class RoomWindow : Window
 
         if (_tiles.TryGetValue(LocalCameraTileId, out var tile) && tile.Watching)
         {
-            PushFrameToTile(tile, frame.Data, frame.Width, frame.Height);
+            PushFrameToTile(tile, frame.Data, frame.Width, frame.Height, frame.Format);
         }
     }
 
@@ -1016,7 +1089,7 @@ public partial class RoomWindow : Window
         decoder.FrameDecoded += frame =>
         {
             if (ReferenceEquals(tile.Decoder, decoder))
-                PushFrameToTile(tile, frame.Data, frame.Width, frame.Height);
+                PushFrameToTile(tile, frame.Data, frame.Width, frame.Height, frame.Format);
         };
         decoder.Start();
         tile.Decoder = decoder;
@@ -1047,8 +1120,7 @@ public partial class RoomWindow : Window
         {
             _audioMixer.RemoveParticipant(tile.ParticipantId);
         }
-        tile.Image.Source = null;
-        tile.Bitmap = null;
+        tile.ClearPicture();
         tile.Placeholder.Text = tile.IsLocal
             ? "Preview desligado (você continua compartilhando)."
             : $"Você parou de assistir {tile.Nickname}.";
@@ -1202,6 +1274,7 @@ public partial class RoomWindow : Window
             Width = width,
             Height = height,
             Watching = true,
+            FrameSeconds = 1.0 / Math.Max(1, info?.Fps ?? (kind == StreamKind.Camera ? 30 : _capture.TargetFps)),
         };
         tile.UpdateToggleLabel();
         tile.UpdateMuteLabel();
@@ -1626,7 +1699,21 @@ public partial class RoomWindow : Window
         Close();
     }
 
-    private void PushFrameToTile(StreamTile tile, byte[] data, int width, int height)
+    // ---------------------------------------------------------------- exibição
+
+    /// <summary>Quantos frames um tile guarda esperando a vez de ir pra tela. Passou disso, o mais
+    /// antigo é descartado: é a exibição que não está acompanhando.</summary>
+    private const int MaxQueuedFrames = 4;
+
+    /// <summary>
+    /// Guarda uma cópia do frame na fila do tile (chamado da thread de captura ou do decoder).
+    /// Quem põe na tela é <see cref="OnCompositionRendering"/>, no ritmo do monitor.
+    ///
+    /// Antes cada frame era desenhado assim que chegava e só existia um "pendente": dois frames
+    /// que chegassem colados (acontece a toda hora com rede ou CPU oscilando) viravam um só na
+    /// tela, e o movimento tremia mesmo com 60 fps chegando.
+    /// </summary>
+    private static void PushFrameToTile(StreamTile tile, byte[] data, int width, int height, FramePixelFormat format)
     {
         lock (tile.Sync)
         {
@@ -1635,56 +1722,190 @@ public partial class RoomWindow : Window
                 return;
             }
 
-            if (tile.PendingFrame is null || tile.PendingFrame.Length != data.Length)
+            var frame = tile.Frames.Count >= MaxQueuedFrames
+                ? tile.Frames.Dequeue()
+                : tile.Pool.Count > 0 ? tile.Pool.Pop() : new TileFrame();
+
+            // O tile só conhece BGRA e YUV planar; o NV12 da captura local é separado em planos
+            // aqui (são só os 2 planos de cor, em meia resolução).
+            var stored = format == FramePixelFormat.Nv12 ? FramePixelFormat.Yuv420p : format;
+            var size = FrameLayout.ByteCount(stored, width, height);
+            if (frame.Data.Length != size)
             {
-                tile.PendingFrame = new byte[data.Length];
+                frame.Data = new byte[size];
             }
 
-            Buffer.BlockCopy(data, 0, tile.PendingFrame, 0, data.Length);
-            tile.Width = width;
-            tile.Height = height;
-
-            if (tile.RenderPending)
+            if (format == FramePixelFormat.Nv12)
             {
-                return;
+                var luma = width * height;
+                var chroma = FrameLayout.ChromaWidth(width) * FrameLayout.ChromaHeight(height);
+                Buffer.BlockCopy(data, 0, frame.Data, 0, luma);
+
+                var interleaved = data.AsSpan(luma, chroma * 2);
+                var u = frame.Data.AsSpan(luma, chroma);
+                var v = frame.Data.AsSpan(luma + chroma, chroma);
+                for (var i = 0; i < chroma; i++)
+                {
+                    u[i] = interleaved[2 * i];
+                    v[i] = interleaved[(2 * i) + 1];
+                }
+            }
+            else
+            {
+                Buffer.BlockCopy(data, 0, frame.Data, 0, size);
             }
 
-            tile.RenderPending = true;
+            frame.Width = width;
+            frame.Height = height;
+            frame.Format = stored;
+            tile.Frames.Enqueue(frame);
         }
-
-        Dispatcher.BeginInvoke(DispatcherPriority.Render, () => RenderTile(tile));
     }
 
-    private void RenderTile(StreamTile tile)
-    {
-        lock (tile.Sync)
-        {
-            tile.RenderPending = false;
+    private TimeSpan _lastRenderingTime = TimeSpan.MinValue;
 
-            if (tile.PendingFrame is null || !tile.Watching)
+    /// <summary>
+    /// Chamado pelo WPF uma vez por atualização do monitor. Cada tile mostra no máximo um frame
+    /// por chamada, então a exibição fica presa ao vsync em vez de depender de quando o frame
+    /// chegou.
+    /// </summary>
+    private void OnCompositionRendering(object? sender, EventArgs e)
+    {
+        // O WPF às vezes dispara este evento mais de uma vez pro mesmo frame de tela.
+        if (e is RenderingEventArgs rendering)
+        {
+            if (rendering.RenderingTime == _lastRenderingTime)
             {
                 return;
             }
 
-            if (tile.Bitmap is null || tile.Bitmap.PixelWidth != tile.Width || tile.Bitmap.PixelHeight != tile.Height)
+            _lastRenderingTime = rendering.RenderingTime;
+        }
+
+        var now = System.Diagnostics.Stopwatch.GetTimestamp();
+        foreach (var tile in _tiles.Values)
+        {
+            PresentDueFrame(tile, now);
+        }
+    }
+
+    private void PresentDueFrame(StreamTile tile, long now)
+    {
+        TileFrame frame;
+
+        lock (tile.Sync)
+        {
+            if (!tile.Watching || tile.Frames.Count == 0)
             {
-                tile.Bitmap = new WriteableBitmap(tile.Width, tile.Height, 96, 96, PixelFormats.Bgra32, null);
-                tile.Image.Source = tile.Bitmap;
+                tile.BehindSinceTicks = 0;
+                return;
             }
 
-            tile.Bitmap.WritePixels(
-                new Int32Rect(0, 0, tile.Width, tile.Height),
-                tile.PendingFrame,
-                tile.Width * 4,
-                0);
+            // Espaçamento mínimo de 75% do intervalo do stream: num monitor de 144 Hz mostrando
+            // 60 fps, impede que dois frames saiam em atualizações seguidas (7 ms) e o próximo
+            // demore 20. Com a fila acumulando, aperta o passo pra alcançar.
+            var spacing = tile.FrameSeconds * (tile.Frames.Count >= 3 ? 0.5 : 0.75);
+            if (tile.LastPresentTicks != 0 &&
+                System.Diagnostics.Stopwatch.GetElapsedTime(tile.LastPresentTicks, now).TotalSeconds < spacing)
+            {
+                return;
+            }
 
-            tile.FramesRendered++;
+            frame = tile.Frames.Dequeue();
+
+            // Um frame sobrando na fila depois de mostrar outro é folga saudável: é ela que absorve
+            // a oscilação de quando o frame chega em relação à atualização do monitor (sem folga,
+            // um frame que chega 1 ms depois do vsync vira "repete um, pula outro"). Custa no
+            // máximo um frame de atraso. Dois ou mais sobrando por meio segundo seguido já é
+            // atraso de verdade, e aí um frame é pulado pra voltar pra perto do ao vivo.
+            if (tile.Frames.Count < 2)
+            {
+                tile.BehindSinceTicks = 0;
+            }
+            else if (tile.BehindSinceTicks == 0)
+            {
+                tile.BehindSinceTicks = now;
+            }
+            else if (System.Diagnostics.Stopwatch.GetElapsedTime(tile.BehindSinceTicks, now).TotalSeconds > 0.5)
+            {
+                tile.Pool.Push(frame);
+                frame = tile.Frames.Dequeue();
+                tile.BehindSinceTicks = 0;
+            }
+
+            tile.LastPresentTicks = now;
+        }
+
+        try
+        {
+            DrawFrame(tile, frame);
+        }
+        finally
+        {
+            lock (tile.Sync)
+            {
+                tile.Pool.Push(frame);
+            }
         }
 
         if (tile.Placeholder.Visibility == Visibility.Visible)
         {
             tile.Placeholder.Visibility = Visibility.Collapsed;
         }
+    }
+
+    private static void DrawFrame(StreamTile tile, TileFrame frame)
+    {
+        var width = frame.Width;
+        var height = frame.Height;
+
+        if (frame.Format == FramePixelFormat.Bgra)
+        {
+            if (tile.Bitmap is null || tile.Bitmap.PixelWidth != width || tile.Bitmap.PixelHeight != height)
+            {
+                tile.Bitmap = new WriteableBitmap(width, height, 96, 96, PixelFormats.Bgra32, null);
+            }
+
+            if (!ReferenceEquals(tile.Image.Source, tile.Bitmap))
+            {
+                tile.Image.Effect = null;
+                tile.Image.Source = tile.Bitmap;
+            }
+
+            tile.Bitmap.WritePixels(new Int32Rect(0, 0, width, height), frame.Data, width * 4, 0);
+        }
+        else
+        {
+            var chromaWidth = FrameLayout.ChromaWidth(width);
+            var chromaHeight = FrameLayout.ChromaHeight(height);
+
+            if (tile.LumaPlane is null || tile.LumaPlane.PixelWidth != width || tile.LumaPlane.PixelHeight != height)
+            {
+                tile.LumaPlane = new WriteableBitmap(width, height, 96, 96, PixelFormats.Gray8, null);
+                tile.UPlane = new WriteableBitmap(chromaWidth, chromaHeight, 96, 96, PixelFormats.Gray8, null);
+                tile.VPlane = new WriteableBitmap(chromaWidth, chromaHeight, 96, 96, PixelFormats.Gray8, null);
+
+                // Sem o shader (não compilou nesta máquina) a imagem aparece em preto e branco:
+                // é só o plano Y. Melhor que tela preta.
+                tile.YuvEffect = YuvEffect.IsAvailable
+                    ? new YuvEffect { U = new ImageBrush(tile.UPlane), V = new ImageBrush(tile.VPlane) }
+                    : null;
+            }
+
+            if (!ReferenceEquals(tile.Image.Source, tile.LumaPlane))
+            {
+                tile.Image.Source = tile.LumaPlane;
+                tile.Image.Effect = tile.YuvEffect;
+            }
+
+            var luma = width * height;
+            var chroma = chromaWidth * chromaHeight;
+            tile.LumaPlane.WritePixels(new Int32Rect(0, 0, width, height), frame.Data, width, 0);
+            tile.UPlane!.WritePixels(new Int32Rect(0, 0, chromaWidth, chromaHeight), frame.Data, chromaWidth, luma);
+            tile.VPlane!.WritePixels(new Int32Rect(0, 0, chromaWidth, chromaHeight), frame.Data, chromaWidth, luma + chroma);
+        }
+
+        tile.FramesRendered++;
     }
 
     // ---------------------------------------------------------------- status
@@ -1795,6 +2016,7 @@ public partial class RoomWindow : Window
     {
         _shuttingDown = true;
         _statsTimer.Stop();
+        CompositionTarget.Rendering -= OnCompositionRendering;
         StopSharing();
 
         foreach (var tile in _tiles.Values)
@@ -1840,9 +2062,27 @@ public partial class RoomWindow : Window
         public StreamInfo? Info { get; init; }
 
         public FfmpegDecoder? Decoder;
+
+        /// <summary>Frames esperando a vez de ir pra tela, e os buffers livres pra reaproveitar.
+        /// Os dois protegidos por <see cref="Sync"/>.</summary>
+        public readonly Queue<TileFrame> Frames = new();
+        public readonly Stack<TileFrame> Pool = new();
+
+        /// <summary>Intervalo entre frames do stream (1/fps), pra espaçar a exibição.</summary>
+        public double FrameSeconds = 1.0 / 60;
+        public long LastPresentTicks;
+        public long BehindSinceTicks;
+
+        /// <summary>Usado quando o frame chega em BGRA (preview da câmera local).</summary>
         public WriteableBitmap? Bitmap;
-        public byte[]? PendingFrame;
-        public bool RenderPending;
+
+        /// <summary>Usados quando o frame chega em YUV: três bitmaps em tons de cinza que o
+        /// <see cref="YuvEffect"/> combina em cor na placa de vídeo.</summary>
+        public WriteableBitmap? LumaPlane;
+        public WriteableBitmap? UPlane;
+        public WriteableBitmap? VPlane;
+        public YuvEffect? YuvEffect;
+
         public bool Watching;
         public int Width;
         public int Height;
@@ -1868,6 +2108,33 @@ public partial class RoomWindow : Window
                 _ = decoder.StopAsync();
         }
 
+        /// <summary>Solta os bitmaps e os frames guardados (UI thread).</summary>
+        public void ClearPicture()
+        {
+            lock (Sync)
+            {
+                Frames.Clear();
+                Pool.Clear();
+                LastPresentTicks = 0;
+                BehindSinceTicks = 0;
+            }
+
+            Image.Effect = null;
+            Image.Source = null;
+            Bitmap = null;
+            LumaPlane = UPlane = VPlane = null;
+            YuvEffect = null;
+        }
+
         public void Dispose() => StopPlayback();
+    }
+
+    /// <summary>Um frame guardado na fila de um tile. O array é reaproveitado entre frames.</summary>
+    private sealed class TileFrame
+    {
+        public byte[] Data = [];
+        public int Width;
+        public int Height;
+        public FramePixelFormat Format;
     }
 }

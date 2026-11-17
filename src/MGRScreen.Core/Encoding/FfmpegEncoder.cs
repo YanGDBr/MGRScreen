@@ -7,18 +7,19 @@ using MGRScreen.Core.Networking;
 namespace MGRScreen.Core.Encoding;
 
 /// <summary>
-/// Envolve um processo `ffmpeg` que recebe vídeo cru (BGRA) via stdin e devolve um stream H.264
-/// elementary (Annex-B) já encodado via stdout.
+/// Envolve um processo `ffmpeg` que recebe vídeo cru via stdin (NV12 da tela, BGRA da câmera —
+/// ver <see cref="SessionSettings.InputFormat"/>) e devolve um stream H.264 elementary (Annex-B)
+/// já encodado via stdout.
 ///
 /// Só vídeo — o áudio vai por um canal de rede separado, sem passar pelo ffmpeg (H.264 cru não
 /// carrega áudio; ver docs/ARCHITECTURE.md).
 ///
 /// Detalhe importante de performance: os frames NÃO são escritos direto pelo thread de captura.
-/// Eles entram num buffer duplo e um único "writer task" os escreve no ritmo exato do
-/// <see cref="SessionSettings.Fps"/>. Isso resolve dois problemas reais da versão anterior:
-/// (1) várias escritas assíncronas concorrentes de ~8 MB no mesmo pipe podiam se intercalar e
-/// corromper o stream cru; (2) alimentar o ffmpeg mais rápido que o `-r` configurado fazia o
-/// stream "correr na frente" e o espectador ficar cada vez mais atrasado.
+/// Eles entram num buffer duplo e um único "writer task" os escreve, no ritmo em que a captura
+/// entrega e nunca acima de <see cref="SessionSettings.Fps"/>. Isso resolve dois problemas reais
+/// de versões anteriores: (1) várias escritas assíncronas concorrentes de vários MB no mesmo
+/// pipe podiam se intercalar e corromper o stream cru; (2) alimentar o ffmpeg mais rápido que o
+/// `-r` configurado fazia o stream "correr na frente" e o espectador ficar cada vez mais atrasado.
 /// </summary>
 public sealed class FfmpegEncoder : IDisposable
 {
@@ -38,6 +39,7 @@ public sealed class FfmpegEncoder : IDisposable
     /// entregando exatamente esse tamanho, senão o stream cru sai desalinhado.</summary>
     public int InputWidth => _settings.Width;
     public int InputHeight => _settings.Height;
+    public FramePixelFormat InputFormat => _settings.InputFormat;
 
     private readonly SessionSettings _settings;
     private readonly string _ffmpegPath;
@@ -52,6 +54,8 @@ public sealed class FfmpegEncoder : IDisposable
     private int _pendingIndex = -1;
     private int _writingIndex = -1;
     private byte[]? _lastWritten;
+    private long _pendingPts;
+    private readonly SemaphoreSlim _frameSignal = new(0, 1);
 
     private long _framesSubmitted;
     private long _framesEncoded;
@@ -116,7 +120,8 @@ public sealed class FfmpegEncoder : IDisposable
     {
         var sb = new StringBuilder();
         sb.Append("-hide_banner -loglevel warning ");
-        sb.Append($"-f rawvideo -pix_fmt bgra -s {_settings.Width}x{_settings.Height} -r {_settings.Fps} -i pipe:0 ");
+        sb.Append($"-f rawvideo -pix_fmt {FrameLayout.FfmpegName(_settings.InputFormat)} " +
+                  $"-s {_settings.Width}x{_settings.Height} -r {_settings.Fps} -i pipe:0 ");
 
         if (_settings.NeedsScaling)
         {
@@ -199,36 +204,91 @@ public sealed class FfmpegEncoder : IDisposable
     /// acumular atraso). O array de origem pode ser reutilizado pelo chamador logo em seguida —
     /// os bytes são copiados aqui.
     /// </summary>
-    public void SubmitFrame(byte[] bgra)
+    public void SubmitFrame(byte[] frame)
     {
+        var capturedAt = TimedMedia.NowUs;
+
         lock (_sync)
         {
             var index = _writingIndex == 0 ? 1 : 0;
 
             var buffer = _buffers[index];
-            if (buffer is null || buffer.Length != bgra.Length)
+            if (buffer is null || buffer.Length != frame.Length)
             {
-                buffer = new byte[bgra.Length];
+                buffer = new byte[frame.Length];
                 _buffers[index] = buffer;
             }
 
-            Buffer.BlockCopy(bgra, 0, buffer, 0, bgra.Length);
+            Buffer.BlockCopy(frame, 0, buffer, 0, frame.Length);
             _pendingIndex = index;
+            _pendingPts = capturedAt;
         }
 
         Interlocked.Increment(ref _framesSubmitted);
+
+        // Acorda o writer na hora. O semáforo tem teto 1: um frame novo que chega antes do
+        // anterior ser escrito só substitui o pendente (acima), não acumula sinais.
+        try
+        {
+            if (_frameSignal.CurrentCount == 0)
+            {
+                _frameSignal.Release();
+            }
+        }
+        catch (SemaphoreFullException)
+        {
+        }
     }
 
+    /// <summary>
+    /// Escreve cada frame no ffmpeg assim que ele chega da captura — é a captura que dita o ritmo.
+    ///
+    /// Antes havia um timer próprio aqui, independente do relógio da captura. Os dois a 60 Hz mas
+    /// fora de fase: um frame podia esperar até 16 ms pelo próximo tick, e quando as fases
+    /// cruzavam um frame era repetido ou pulado (medido: 60 entregues, 62,5 escritos por
+    /// segundo). O resultado era movimento tremido mesmo com "60 fps" no contador.
+    ///
+    /// O timer só sobrou pra tela parada: sem frame novo, o último é repetido pra manter os
+    /// keyframes saindo (quem entra na sala depois precisa de um pra ver alguma coisa).
+    /// </summary>
     private async Task WriteFramesLoopAsync(CancellationToken token)
     {
         var stream = _process!.StandardInput.BaseStream;
-        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(1.0 / Math.Max(1, _settings.Fps)));
+        var interval = TimeSpan.FromSeconds(1.0 / Math.Max(1, _settings.Fps));
+
+        // Teto de taxa: uma fonte mais rápida que o alvo (câmera em 50/60 fps com alvo de 30) não
+        // pode passar tudo adiante, senão o bitrate estoura (o encoder calcula os bits por frame
+        // pelo fps configurado). `nextDue` anda um intervalo por frame escrito, então a média
+        // nunca passa do alvo; a tolerância deixa passar um frame que chegou um pouco adiantado.
+        var tolerance = interval * 0.4;
+        var clock = Stopwatch.StartNew();
+        var nextDue = TimeSpan.Zero;
+
+        // Tolerância antes de repetir: um frame só um pouco atrasado não deve virar
+        // "repetido + o de verdade logo depois". Com a tela parada mesmo, repete no ritmo normal.
+        // A repetição também obedece `nextDue`, senão frames reais irregulares + repetições nos
+        // buracos somariam mais que o fps alvo (medido: 67 fps saindo com alvo de 60).
+        var idle = false;
 
         try
         {
-            while (await timer.WaitForNextTickAsync(token))
+            while (!token.IsCancellationRequested)
             {
+                var untilRepeat = nextDue - clock.Elapsed + (idle ? TimeSpan.Zero : interval * 0.5);
+                var signaled = await _frameSignal.WaitAsync(
+                    untilRepeat > TimeSpan.Zero ? untilRepeat : TimeSpan.Zero, token);
+
+                if (signaled)
+                {
+                    var early = nextDue - tolerance - clock.Elapsed;
+                    if (early > TimeSpan.Zero)
+                    {
+                        await Task.Delay(early, token);
+                    }
+                }
+
                 byte[]? toWrite;
+                long pts;
 
                 lock (_sync)
                 {
@@ -237,10 +297,16 @@ public sealed class FfmpegEncoder : IDisposable
                         _writingIndex = _pendingIndex;
                         _pendingIndex = -1;
                         _lastWritten = _buffers[_writingIndex];
+                        pts = _pendingPts;
+                        idle = false;
+                    }
+                    else
+                    {
+                        // Sem frame novo: repete o último. Custa quase nada em H.264.
+                        pts = TimedMedia.NowUs;
+                        idle = true;
                     }
 
-                    // Sem frame novo: repete o último. Mantém o stream em taxa constante (o que
-                    // o `-r` do ffmpeg espera) e custa quase nada em H.264 numa tela parada.
                     toWrite = _lastWritten;
                 }
 
@@ -249,14 +315,17 @@ public sealed class FfmpegEncoder : IDisposable
                     continue; // ainda não chegou o primeiro frame
                 }
 
-                // All encoder presets use no B-frames and raw video provides one output AU per
-                // input frame. Record the actual pacing time, including repeats and stalls.
-                if (_frameTimes is not null && !_frameTimes.Writer.TryWrite(TimedMedia.NowUs))
+                // Sem B-frames, o encoder devolve uma access unit por frame de entrada, na ordem.
+                // O PTS é a hora da CAPTURA (ou da repetição), não a hora em que o pipe aceitou.
+                if (_frameTimes is not null && !_frameTimes.Writer.TryWrite(pts))
                 {
                     FfmpegLogLine?.Invoke("Encoder não está produzindo frames.");
                     _process?.Kill();
                     return;
                 }
+
+                var now = clock.Elapsed;
+                nextDue = nextDue + interval > now ? nextDue + interval : now + interval;
                 await stream.WriteAsync(toWrite, token);
                 await stream.FlushAsync(token);
                 Interlocked.Increment(ref _framesEncoded);

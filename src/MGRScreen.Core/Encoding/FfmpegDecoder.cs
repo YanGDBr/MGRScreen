@@ -1,24 +1,28 @@
 using System.Diagnostics;
+using MGRScreen.Core.Models;
 using MGRScreen.Core.Networking;
 
 namespace MGRScreen.Core.Encoding;
 
 /// <summary>
 /// Um frame decodificado. ATENÇÃO: <see cref="Data"/> é um buffer REUTILIZADO entre frames — só
-/// vale durante a execução do handler. Quem precisa guardar deve copiar. (Alocar 8 MB por frame
-/// jogava tudo no Large Object Heap dezenas de vezes por segundo e derrubava o FPS real.)
+/// vale durante a execução do handler. Quem precisa guardar deve copiar. (Alocar vários MB por
+/// frame jogava tudo no Large Object Heap dezenas de vezes por segundo e derrubava o FPS real.)
 /// </summary>
 public readonly struct DecodedFrame
 {
-    public required byte[] Data { get; init; } // BGRA32
+    public required byte[] Data { get; init; }
     public required int Width { get; init; }
     public required int Height { get; init; }
+    public FramePixelFormat Format { get; init; }
 }
 
 /// <summary>
 /// Lado do Viewer: alimenta um processo `ffmpeg` com o stream H.264 elementary (Annex-B) bruto
-/// recebido pela rede (via stdin) e recebe de volta frames de vídeo decodificados em BGRA32
-/// (via stdout). Só vídeo — o áudio viaja num canal de rede separado, sem passar pelo ffmpeg
+/// recebido pela rede (via stdin) e recebe de volta frames de vídeo decodificados em YUV 4:2:0
+/// planar (via stdout). YUV e não BGRA porque é o formato nativo do H.264: pedir BGRA fazia o
+/// ffmpeg converter cada frame na CPU e mandar 2,7x mais bytes pelo pipe (medido: ~12 ms de CPU
+/// por frame contra ~6 ms). A conversão pra RGB é feita por um shader na hora de exibir. Só vídeo — o áudio viaja num canal de rede separado, sem passar pelo ffmpeg
 /// (ver <see cref="FfmpegEncoder"/> e docs/ARCHITECTURE.md sobre o porquê).
 /// </summary>
 public sealed class FfmpegDecoder : IDisposable
@@ -81,7 +85,7 @@ public sealed class FfmpegDecoder : IDisposable
 
         var args = $"-hide_banner -loglevel warning {hardware}" +
                    $"-probesize 32 -analyzeduration 0 -flags low_delay -flush_packets 1 " +
-                   $"-f h264 -i pipe:0 -map 0:v -pix_fmt bgra -f rawvideo pipe:1 ";
+                   $"-f h264 -i pipe:0 -map 0:v -pix_fmt yuv420p -f rawvideo pipe:1 ";
 
         var psi = new ProcessStartInfo(_ffmpegPath, args)
         {
@@ -173,7 +177,7 @@ public sealed class FfmpegDecoder : IDisposable
     /// </summary>
     private void PumpVideo(Process process, CancellationToken token)
     {
-        var frameSize = _width * _height * 4;
+        var frameSize = FrameLayout.ByteCount(FramePixelFormat.Yuv420p, _width, _height);
         var frameBuffer = new byte[frameSize];
 
         try
@@ -188,7 +192,13 @@ public sealed class FfmpegDecoder : IDisposable
                 }
 
                 // Entrega o próprio buffer (reutilizado) — ver comentário em DecodedFrame.
-                FrameDecoded?.Invoke(new DecodedFrame { Data = frameBuffer, Width = _width, Height = _height });
+                FrameDecoded?.Invoke(new DecodedFrame
+                {
+                    Data = frameBuffer,
+                    Width = _width,
+                    Height = _height,
+                    Format = FramePixelFormat.Yuv420p,
+                });
             }
         }
         catch (Exception ex) when (ex is IOException or ObjectDisposedException or InvalidOperationException)

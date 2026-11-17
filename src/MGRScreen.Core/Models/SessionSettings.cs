@@ -13,6 +13,10 @@ public sealed class SessionSettings
     public int OutputWidth { get; set; }
     public int OutputHeight { get; set; }
 
+    /// <summary>Formato dos frames crus entregues ao encoder. A tela chega em NV12 já no tamanho
+    /// final (convertida na GPU); a câmera chega em BGRA.</summary>
+    public FramePixelFormat InputFormat { get; set; } = FramePixelFormat.Bgra;
+
     public int Fps { get; set; } = 60;
     public int VideoBitrateKbps { get; set; } = 10_000;
 

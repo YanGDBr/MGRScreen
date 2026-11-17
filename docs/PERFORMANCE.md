@@ -332,3 +332,57 @@ adiciona carga exatamente onde já falta. Com bitrate constante, 90 fps signific
 menos bits (pior imagem) pela mesma banda; com mais bitrate, mais descarte. O que garante 60 fps
 chegando é folga de banda, o pipeline tolerar rajada (7.1) e decodificação por hardware em quem
 assiste — tudo já feito.
+
+---
+
+## 8. Ritmo dos frames e conversão de cor na GPU (17/11/2026)
+
+Pedido: chegar mais perto do Discord em fluidez e em peso na máquina. Duas causas, medidas com
+as classes reais (1080p60, NVENC, RTX 2050):
+
+### 8.1 Dois relógios no caminho do frame
+
+A captura entregava a 60 fps e o encoder escrevia num `PeriodicTimer` próprio, fora de fase:
+entravam 60 frames por segundo e saíam 62,5 (frames repetidos), e cada frame esperava até 16 ms
+pelo próximo tick. Do lado de quem assiste, cada frame era desenhado assim que chegava e só
+existia um "pendente": dois frames colados viravam um só na tela.
+
+- **Encoder**: escreve cada frame quando ele chega da captura. O timer só sobrou pra repetir o
+  último frame com a tela parada (mantém os keyframes saindo). Um teto (`nextDue`) impede passar
+  do fps alvo. O PTS passou a ser a hora da captura, não a da escrita no pipe.
+- **Exibição**: cada tile tem uma fila curta (até 4 frames) e quem desenha é o
+  `CompositionTarget.Rendering`, no máximo um frame por atualização do monitor. Um frame de folga
+  na fila é mantido de propósito; dois ou mais por meio segundo fazem um frame ser pulado.
+
+### 8.2 BGRA cru atravessando CPU e pipes
+
+- **Captura**: `GpuNv12Converter` converte BGRA → NV12 e reduz pra resolução final com dois
+  shaders, antes de ler da GPU. Chegam 3 MB por frame em vez de 8 (1080p) ou 15 (1440p), e o
+  ffmpeg não reduz nem converte mais nada. Se o shader falhar, a captura volta sozinha pro
+  caminho BGRA antigo.
+- **Decoder**: entrega YUV 4:2:0 planar em vez de BGRA. A conversão pra RGB é um pixel shader do
+  WPF (`YuvEffect`, ps_2_0) sobre três bitmaps em tons de cinza.
+- A câmera continua em BGRA (resolução baixa, 30 fps).
+
+### 8.3 Resultado
+
+Mesmo teste ponta a ponta de antes (encoder → decoder, sem rede):
+
+| Medida | Antes | Depois |
+| --- | --- | --- |
+| Frames escritos no encoder (60 entregues) | 62,5/s | 60,0/s |
+| Latência, mediana | 100–120 ms | 66–75 ms |
+| CPU do processo C# | ~116% de um núcleo | ~16% |
+| CPU do ffmpeg encoder | ~45% | ~18% |
+| CPU do ffmpeg decoder | ~130–150% | ~38% |
+
+Com captura de tela de verdade no meio (monitor 1080p): 60 fps capturados, codificados e
+decodificados sem descarte, ~0,85 núcleo somando tudo. As cores de seis quadrados de teste
+voltaram com erro de no máximo 1 em 255 depois de captura, encode, decode e shader.
+
+### 8.4 O que não foi verificado
+
+- Monitor acima de 1080p de verdade: a redução na GPU só foi exercitada de 1080p pra 720p.
+- AMD (AMF) e Intel (QSV): só NVENC e libx264 foram testados.
+- O caminho de reserva em BGRA, quando o shader não compila.
+- Rede real: os números acima são na mesma máquina.
