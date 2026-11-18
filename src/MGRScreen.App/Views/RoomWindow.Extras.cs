@@ -83,6 +83,22 @@ public partial class RoomWindow
         InitializeChat();
         InitializeVoice();
         OnRoomFeaturesChanged();
+
+        if (_settings.CheckUpdates)
+        {
+            _ = RemindAboutUpdateAsync();
+        }
+    }
+
+    /// <summary>Dentro da sala a atualização só é lembrada: instalar agora fecharia o app e
+    /// derrubaria a transmissão. O botão de atualizar fica no menu inicial.</summary>
+    private async Task RemindAboutUpdateAsync()
+    {
+        var update = await UpdateChecker.CheckAsync(CancellationToken.None);
+        if (update is not null && !_shuttingDown)
+        {
+            ShowToast($"Saiu a versão {update.Version}. Dá pra atualizar pelo menu inicial, ao sair da sala.", "");
+        }
     }
 
     private void ShutdownExtras()

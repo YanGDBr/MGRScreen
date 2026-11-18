@@ -59,14 +59,44 @@ public partial class MainWindow
 
         _update = update;
         UpdateBannerText.Text = $"Saiu a versão {update.Version} do MGRScreen (você está na {UpdateChecker.CurrentVersion}).";
+        // Cópia instalada atualiza sozinha com um clique; a portátil só tem o link de download.
+        UpdateButton.Content = AppUpdater.CanInstall(update) ? "Atualizar agora" : "Baixar";
         UpdateBanner.Visibility = Visibility.Visible;
     }
 
-    private void OnUpdateClick(object sender, RoutedEventArgs e)
+    private async void OnUpdateClick(object sender, RoutedEventArgs e)
     {
         if (_update is null)
         {
             return;
+        }
+
+        if (AppUpdater.CanInstall(_update))
+        {
+            var version = _update.Version;
+            UpdateButton.IsEnabled = false;
+            try
+            {
+                var progress = new Progress<double>(p =>
+                    UpdateBannerText.Text = $"Baixando a versão {version}... {p * 100:0}%");
+                var installer = await AppUpdater.DownloadAsync(_update, progress, CancellationToken.None);
+
+                UpdateBannerText.Text = "Instalando... o MGRScreen vai fechar e abrir de novo sozinho.";
+                AppUpdater.InstallAndRestart(installer);
+                _scanCts.Cancel();
+                Application.Current.Shutdown();
+                return;
+            }
+            catch (Exception ex)
+            {
+                // Falhou (sem internet, arquivo não confere...): nada foi instalado, e o botão
+                // vira o link pra baixar à mão.
+                UpdateBannerText.Text = $"Não consegui atualizar sozinho: {ex.Message}";
+                UpdateButton.Content = "Baixar";
+                UpdateButton.IsEnabled = true;
+                _update = _update with { InstallerUrl = null };
+                return;
+            }
         }
 
         try

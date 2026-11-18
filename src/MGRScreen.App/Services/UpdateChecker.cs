@@ -10,7 +10,11 @@ namespace MGRScreen.App.Services;
 /// </summary>
 public static class UpdateChecker
 {
-    public sealed record UpdateInfo(Version Version, string Tag, string Url);
+    /// <param name="InstallerUrl">Endereço do instalador do Windows nessa versão, quando a
+    /// release tem um e o GitHub informou o SHA-256 dele. Sem os dois, não há atualização
+    /// automática: só o link pra página.</param>
+    public sealed record UpdateInfo(Version Version, string Tag, string Url,
+        string? InstallerUrl = null, string? InstallerSha256 = null, long InstallerSize = 0);
 
     private const string LatestReleaseApi = "https://api.github.com/repos/YanGDBr/MGRScreen/releases/latest";
     private const string ReleasesPage = "https://github.com/YanGDBr/MGRScreen/releases/latest";
@@ -26,6 +30,13 @@ public static class UpdateChecker
     /// procurar atualização não pode atrapalhar quem só quer usar o app.
     /// </summary>
     public static async Task<UpdateInfo?> CheckAsync(CancellationToken token)
+    {
+        var latest = await GetLatestAsync(token);
+        return latest is not null && latest.Version > CurrentVersion ? latest : null;
+    }
+
+    /// <summary>A última versão publicada, seja ela mais nova que a atual ou não. Nunca lança.</summary>
+    public static async Task<UpdateInfo?> GetLatestAsync(CancellationToken token)
     {
         try
         {
@@ -53,10 +64,6 @@ public static class UpdateChecker
             }
 
             var version = Normalize(parsed);
-            if (version <= CurrentVersion)
-            {
-                return null;
-            }
 
             // Esse endereço vai ser aberto no navegador, então só passa se for mesmo uma página
             // https do GitHub; qualquer outra coisa vira a página de versões conhecida.
@@ -70,12 +77,54 @@ public static class UpdateChecker
                 url = uri.AbsoluteUri;
             }
 
-            return new UpdateInfo(version, tag, url);
+            var (installerUrl, installerHash, installerSize) = FindInstaller(root);
+            return new UpdateInfo(version, tag, url, installerUrl, installerHash, installerSize);
         }
         catch
         {
             return null;
         }
+    }
+
+    /// <summary>
+    /// Procura o instalador do Windows entre os arquivos da release. Só vale se vier com endereço
+    /// https do GitHub, tamanho e o SHA-256 que o próprio GitHub calcula no upload — é esse hash
+    /// que garante que o arquivo baixado é o que foi publicado.
+    /// </summary>
+    private static (string? Url, string? Sha256, long Size) FindInstaller(JsonElement release)
+    {
+        if (!release.TryGetProperty("assets", out var assets) || assets.ValueKind != JsonValueKind.Array)
+        {
+            return default;
+        }
+
+        foreach (var asset in assets.EnumerateArray())
+        {
+            if (asset.ValueKind != JsonValueKind.Object
+                || !asset.TryGetProperty("name", out var name) || name.ValueKind != JsonValueKind.String
+                || !name.GetString()!.EndsWith("-windows-x64-setup.exe", StringComparison.OrdinalIgnoreCase)
+                || !asset.TryGetProperty("browser_download_url", out var url) || url.ValueKind != JsonValueKind.String
+                || !asset.TryGetProperty("digest", out var digest) || digest.ValueKind != JsonValueKind.String
+                || !asset.TryGetProperty("size", out var size) || !size.TryGetInt64(out var bytes) || bytes <= 0)
+            {
+                continue;
+            }
+
+            var hash = digest.GetString()!;
+            if (!hash.StartsWith("sha256:", StringComparison.OrdinalIgnoreCase)
+                || hash.Length != 71
+                || !hash.AsSpan(7).ToString().All(Uri.IsHexDigit)
+                || !Uri.TryCreate(url.GetString(), UriKind.Absolute, out var uri)
+                || uri.Scheme != Uri.UriSchemeHttps
+                || !uri.Host.Equals("github.com", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            return (uri.AbsoluteUri, hash[7..].ToUpperInvariant(), bytes);
+        }
+
+        return default;
     }
 
     private static HttpClient CreateClient()

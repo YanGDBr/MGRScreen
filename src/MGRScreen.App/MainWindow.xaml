@@ -37,8 +37,8 @@
                         </Grid.ColumnDefinitions>
                         <TextBlock x:Name="UpdateBannerText" VerticalAlignment="Center" FontSize="12"
                                    Margin="0,0,10,0"/>
-                        <Button Grid.Column="1" Content="Baixar" Tag="&#xE896;" Padding="12,6" FontSize="12"
-                                Click="OnUpdateClick"/>
+                        <Button x:Name="UpdateButton" Grid.Column="1" Content="Baixar" Tag="&#xE896;"
+                                Padding="12,6" FontSize="12" Click="OnUpdateClick"/>
                     </Grid>
                 </Border>
 
