@@ -2,7 +2,7 @@
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="MGRScreen — Sala" Height="780" Width="1240"
-        MinHeight="520" MinWidth="1000"
+        MinHeight="520" MinWidth="900"
         Background="{StaticResource BgBrush}"
         Icon="../Assets/mgrscreen.png"
         WindowStartupLocation="CenterScreen">
@@ -13,38 +13,46 @@
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
-        <!-- Cabeçalho -->
+        <!-- ============ Barra superior: quem é a sala, quem está nela, e as opções de visão ============ -->
         <Border Grid.Row="0" Background="{StaticResource SurfaceBrush}" BorderBrush="{StaticResource BorderBrush2}"
-                BorderThickness="0,0,0,1" Padding="20,14">
+                BorderThickness="0,0,0,1" Padding="16,10">
             <Grid>
-                <!-- MinWidth na coluna dos participantes: sem piso, quando os outros blocos
-                     ocupavam a largura toda ela era espremida a ~0 px, o texto quebrava uma letra
-                     por linha e o cabeçalho crescia até cobrir a janela inteira. -->
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="Auto"/>
                     <ColumnDefinition Width="Auto"/>
-                    <ColumnDefinition Width="*" MinWidth="170"/>
-                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="*" MinWidth="160"/>
                     <ColumnDefinition Width="Auto"/>
                 </Grid.ColumnDefinitions>
 
-                <Image Grid.Column="0" Source="../Assets/mgrscreen.png" Width="34" Height="34"
-                       Margin="0,0,14,0" VerticalAlignment="Center"
+                <Image Grid.Column="0" Source="../Assets/mgrscreen.png" Width="30" Height="30"
+                       Margin="0,0,12,0" VerticalAlignment="Center"
                        RenderOptions.BitmapScalingMode="HighQuality"/>
 
-                <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="0,0,20,0">
-                    <TextBlock Text="ENDEREÇO DA SALA" Style="{StaticResource SectionHeaderTextStyle}"/>
-                    <StackPanel Orientation="Horizontal" Margin="0,2,0,0">
-                        <TextBlock x:Name="RoomAddressText" Text="..." FontFamily="Consolas"
-                                   FontSize="16" FontWeight="SemiBold" VerticalAlignment="Center"/>
-                        <Button Content="Copiar convite" Style="{StaticResource SecondaryButtonStyle}"
-                                Padding="10,4" FontSize="11" Margin="12,0,0,0"
-                                VerticalAlignment="Center" Click="OnCopyRoomInfoClick"/>
-                    </StackPanel>
+                <!-- Endereço da sala num chip clicável: é o que os amigos precisam pra entrar. -->
+                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,18,0">
+                    <Border Background="{StaticResource Surface2Brush}" BorderBrush="{StaticResource BorderBrush2}"
+                            BorderThickness="1" CornerRadius="9" Padding="12,6">
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock x:Name="RoomLockIcon" Text="&#xE72E;" FontFamily="Segoe MDL2 Assets" FontSize="12"
+                                       Foreground="{DynamicResource AccentBrush}" VerticalAlignment="Center"
+                                       Margin="0,0,8,0" Visibility="Collapsed" ToolTip="Sala com senha"/>
+                            <StackPanel>
+                                <TextBlock Text="SALA" Style="{StaticResource SectionHeaderTextStyle}" FontSize="9"/>
+                                <TextBlock x:Name="RoomAddressText" Text="..." FontFamily="Consolas"
+                                           FontSize="14" FontWeight="SemiBold"/>
+                            </StackPanel>
+                        </StackPanel>
+                    </Border>
+                    <Button Content="&#xE8C8;" Style="{StaticResource IconButtonStyle}" Margin="6,0,0,0"
+                            ToolTip="Copiar convite (texto com o endereço)" Click="OnCopyRoomInfoClick"/>
+                    <Button Content="&#xE71B;" Style="{StaticResource IconButtonStyle}"
+                            ToolTip="Copiar link de convite (abre o MGRScreen direto na sala)"
+                            Click="OnCopyInviteLinkClick"/>
                 </StackPanel>
 
-                <StackPanel Grid.Column="2" VerticalAlignment="Center" HorizontalAlignment="Left" Margin="0,0,16,0">
-                    <TextBlock x:Name="ParticipantsText" Text="Conectando..." Style="{StaticResource SectionHeaderTextStyle}"/>
+                <StackPanel Grid.Column="2" VerticalAlignment="Center" HorizontalAlignment="Left" Margin="0,0,12,0">
+                    <TextBlock x:Name="ParticipantsText" Text="Conectando..." Style="{StaticResource SectionHeaderTextStyle}"
+                               FontSize="10"/>
                     <ItemsControl x:Name="ParticipantsPanel" Margin="0,4,0,0">
                         <ItemsControl.ItemsPanel>
                             <ItemsPanelTemplate>
@@ -52,16 +60,178 @@
                             </ItemsPanelTemplate>
                         </ItemsControl.ItemsPanel>
                     </ItemsControl>
-                    <TextBlock x:Name="ConnectionInfoText" Style="{StaticResource CaptionTextStyle}" Margin="0,4,0,0"/>
-                    <TextBlock x:Name="RelayUploadText" Style="{StaticResource CaptionTextStyle}" Margin="0,2,0,0"
-                               Foreground="{StaticResource TextPrimaryBrush}"/>
                 </StackPanel>
 
-                <!-- Áudio: dispositivo + medidor de nível (pra dar pra ver se está captando algo) -->
-                <StackPanel Grid.Column="3" VerticalAlignment="Center" Margin="0,0,16,0" Width="290">
+                <StackPanel Grid.Column="3" Orientation="Horizontal" VerticalAlignment="Center">
+                    <StackPanel VerticalAlignment="Center" Margin="0,0,12,0">
+                        <TextBlock x:Name="ConnectionInfoText" Style="{StaticResource CaptionTextStyle}"
+                                   HorizontalAlignment="Right" TextWrapping="NoWrap"/>
+                        <TextBlock x:Name="RelayUploadText" Style="{StaticResource CaptionTextStyle}"
+                                   HorizontalAlignment="Right" TextWrapping="NoWrap"
+                                   Foreground="{StaticResource TextSecondaryBrush}"/>
+                    </StackPanel>
+                    <Button x:Name="LayoutButton" Content="&#xF0E2;" Style="{StaticResource IconButtonStyle}"
+                            ToolTip="Disposição das telas" Click="OnLayoutButtonClick"/>
+                    <Button x:Name="ChatToggleButton" Content="&#xE8BD;" Style="{StaticResource IconButtonStyle}"
+                            ToolTip="Chat da sala" Click="OnChatToggleClick"/>
+                    <Button Content="&#xE713;" Style="{StaticResource IconButtonStyle}"
+                            ToolTip="Configurações" Click="OnSettingsClick"/>
+                </StackPanel>
+            </Grid>
+        </Border>
+
+        <!-- ============ Área das telas + painel de chat ============ -->
+        <Grid Grid.Row="1">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+
+            <Grid x:Name="TilesArea" Grid.Column="0" Margin="10" ClipToBounds="True">
+                <!-- Estado vazio -->
+                <StackPanel x:Name="EmptyStatePanel" HorizontalAlignment="Center" VerticalAlignment="Center">
+                    <Border Width="72" Height="72" CornerRadius="36" Background="{DynamicResource AccentSoftBrush}"
+                            HorizontalAlignment="Center">
+                        <TextBlock Text="&#xE7F4;" FontFamily="Segoe MDL2 Assets" FontSize="30"
+                                   Foreground="{DynamicResource AccentBrush}"
+                                   HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                    </Border>
+                    <TextBlock Text="Ninguém está compartilhando ainda" FontSize="16" FontWeight="SemiBold"
+                               HorizontalAlignment="Center" Margin="0,16,0,0"/>
+                    <TextBlock x:Name="EmptyStateText"
+                               Text="Use “Compartilhar tela” aqui embaixo pra começar."
+                               Style="{StaticResource CaptionTextStyle}" FontSize="12" TextAlignment="Center"
+                               HorizontalAlignment="Center" Margin="0,6,0,0"/>
+                </StackPanel>
+
+                <!-- Palco: cada tela tem posição e tamanho próprios (ver RoomWindow.Layout.cs). -->
+                <Canvas x:Name="TilesGrid"/>
+
+                <Border x:Name="ReconnectBanner" Visibility="Collapsed" Panel.ZIndex="5000"
+                        Background="{StaticResource DangerSoftBrush}" BorderBrush="{StaticResource DangerBrush}"
+                        BorderThickness="1" CornerRadius="10" Padding="16,10"
+                        HorizontalAlignment="Center" VerticalAlignment="Top" Margin="0,4,0,0">
+                    <TextBlock x:Name="ReconnectBannerText" Foreground="{StaticResource TextPrimaryBrush}"
+                               FontSize="12" FontWeight="SemiBold"/>
+                </Border>
+
+                <!-- Avisos rápidos (alguém entrou, gravação salva...). -->
+                <StackPanel x:Name="ToastHost" HorizontalAlignment="Right" VerticalAlignment="Top"
+                            Margin="0,6,6,0" Panel.ZIndex="6000" Width="320"/>
+            </Grid>
+
+            <!-- Chat -->
+            <Border x:Name="ChatPanel" Grid.Column="1" Width="320" Visibility="Collapsed"
+                    Background="{StaticResource SurfaceBrush}" BorderBrush="{StaticResource BorderBrush2}"
+                    BorderThickness="1,0,0,0">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+
+                    <Grid Grid.Row="0" Margin="16,12,8,10">
+                        <TextBlock Text="CHAT DA SALA" Style="{StaticResource SectionHeaderTextStyle}"
+                                   VerticalAlignment="Center"/>
+                        <Button Content="&#xE711;" Style="{StaticResource IconButtonStyle}" Width="28" Height="28"
+                                FontSize="11" HorizontalAlignment="Right" ToolTip="Fechar o chat"
+                                Click="OnChatToggleClick"/>
+                    </Grid>
+
+                    <ScrollViewer x:Name="ChatScroll" Grid.Row="1" VerticalScrollBarVisibility="Auto"
+                                  HorizontalScrollBarVisibility="Disabled" Padding="16,0,10,0">
+                        <StackPanel x:Name="ChatMessages"/>
+                    </ScrollViewer>
+
+                    <TextBlock x:Name="ChatUnavailableText" Grid.Row="1" Visibility="Collapsed"
+                               Style="{StaticResource CaptionTextStyle}" TextAlignment="Center" Margin="24"
+                               VerticalAlignment="Center"
+                               Text="O chat precisa que o anfitrião esteja na versão nova do MGRScreen."/>
+
+                    <Grid Grid.Row="2" Margin="12,10,12,12">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <TextBox x:Name="ChatInput" Grid.Column="0" MaxLength="2000" KeyDown="OnChatInputKeyDown"
+                                 ToolTip="Enter envia"/>
+                        <Button Grid.Column="1" Content="&#xE724;" Style="{StaticResource IconButtonStyle}"
+                                Margin="6,0,0,0" ToolTip="Enviar" Click="OnChatSendClick"
+                                Foreground="{DynamicResource AccentBrush}"/>
+                    </Grid>
+                </Grid>
+            </Border>
+        </Grid>
+
+        <!-- ============ Barra de ações ============ -->
+        <Border Grid.Row="2" Background="{StaticResource SurfaceBrush}" BorderBrush="{StaticResource BorderBrush2}"
+                BorderThickness="0,1,0,0" Padding="16,10">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+
+                <TextBlock x:Name="StatusText" Grid.Column="0" Style="{StaticResource CaptionTextStyle}"
+                           TextWrapping="Wrap" VerticalAlignment="Center" Margin="0,0,16,0" MaxHeight="34"
+                           TextTrimming="CharacterEllipsis"/>
+
+                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                    <Button x:Name="MicButton" Content="Microfone" Tag="&#xE720;"
+                            Style="{StaticResource SecondaryButtonStyle}" Padding="14,9" Margin="0,0,8,0"
+                            Click="OnMicClick" ToolTip="Falar na sala"/>
+                    <!-- Desabilitado até detectar o encoder (fim do OnLoaded): ligar antes disso
+                         cairia no libx264 mesmo com placa de vídeo disponível. -->
+                    <Button x:Name="CameraButton" Content="Ligar câmera" Tag="&#xE714;"
+                            Style="{StaticResource SecondaryButtonStyle}" Padding="14,9" IsEnabled="False"
+                            Click="OnCameraClick" Margin="0,0,8,0"/>
+                    <Button x:Name="ShareAgainButton" Content="Compartilhar de novo" Tag="&#xE72C;"
+                            Style="{StaticResource SecondaryButtonStyle}" Padding="14,9" Visibility="Collapsed"
+                            Click="OnShareAgainClick" Margin="0,0,8,0"/>
+                    <Button x:Name="ShareButton" Content="Compartilhar tela" Tag="&#xE7F4;" Padding="18,9"
+                            Click="OnShareClick"/>
+                    <Button x:Name="ShareRegionButton" Content="&#xEF20;" Style="{StaticResource IconButtonStyle}"
+                            Margin="4,0,0,0" ToolTip="Compartilhar só uma região da tela"
+                            Click="OnShareRegionClick"/>
+                    <Button x:Name="StopShareButton" Content="Parar" Tag="&#xE71A;"
+                            Style="{StaticResource DangerButtonStyle}" Padding="18,9"
+                            Click="OnStopShareClick" Visibility="Collapsed"/>
+                    <Button x:Name="StreamOptionsButton" Content="&#xE9E9;" Style="{StaticResource IconButtonStyle}"
+                            Margin="4,0,0,0" ToolTip="Áudio e qualidade da transmissão"
+                            Click="OnStreamOptionsClick"/>
+                </StackPanel>
+
+                <StackPanel Grid.Column="2" Orientation="Horizontal" HorizontalAlignment="Right"
+                            VerticalAlignment="Center">
+                    <TextBlock Text="&#xE767;" FontFamily="Segoe MDL2 Assets" FontSize="14"
+                               Foreground="{StaticResource TextSecondaryBrush}" VerticalAlignment="Center"
+                               ToolTip="Volume da sala"/>
+                    <Slider x:Name="MasterVolumeSlider" Minimum="0" Maximum="100" Value="100" Width="96"
+                            Margin="8,0,6,0" VerticalAlignment="Center" ValueChanged="OnMasterVolumeChanged"/>
+                    <TextBlock x:Name="MasterVolumeText" Text="100%" Style="{StaticResource CaptionTextStyle}"
+                               Width="34" VerticalAlignment="Center"/>
+                    <Button x:Name="LeaveRoomButton" Content="Sair" Tag="&#xE7E8;"
+                            Style="{StaticResource DangerButtonStyle}" Padding="14,9"
+                            Click="OnLeaveRoomClick" Margin="12,0,0,0"/>
+                </StackPanel>
+            </Grid>
+        </Border>
+
+        <!-- Camada de tela cheia: recebe a tela escolhida por cima de tudo -->
+        <Grid x:Name="FullscreenHost" Grid.Row="0" Grid.RowSpan="3" Background="Black"
+              Visibility="Collapsed"/>
+
+        <!-- ============ Painéis flutuantes ============ -->
+
+        <!-- Áudio e qualidade do que eu transmito. -->
+        <Popup x:Name="StreamOptionsPopup" PlacementTarget="{Binding ElementName=StreamOptionsButton}"
+               Placement="Top" StaysOpen="False" AllowsTransparency="True" PopupAnimation="Fade">
+            <Border Style="{StaticResource FlyoutStyle}" Width="320">
+                <StackPanel>
                     <TextBlock Text="ÁUDIO QUE VOU COMPARTILHAR" Style="{StaticResource SectionHeaderTextStyle}"/>
-                    <ComboBox x:Name="AudioModeCombo" Margin="0,4,0,6"
-                              SelectionChanged="OnAudioModeChanged">
+                    <ComboBox x:Name="AudioModeCombo" Margin="0,6,0,6" SelectionChanged="OnAudioModeChanged">
                         <ComboBoxItem Content="Tudo, menos MGRScreen e Discord" IsSelected="True"/>
                         <ComboBoxItem Content="Tudo, menos o MGRScreen (sem eco)"/>
                         <ComboBoxItem Content="Tudo, menos o Discord"/>
@@ -73,93 +243,43 @@
                         <Border x:Name="AudioLevelBar" Width="0" HorizontalAlignment="Left"
                                 CornerRadius="3" Background="{StaticResource SuccessBrush}"/>
                     </Border>
-                    <ComboBox x:Name="QualityCombo" Margin="0,8,0,0">
-                        <ComboBoxItem Content="Qualidade: 1080p 30fps" IsSelected="True"/>
-                        <ComboBoxItem Content="Qualidade: 1080p 60fps"/>
-                        <ComboBoxItem Content="Qualidade: 720p 60fps"/>
-                        <ComboBoxItem Content="Qualidade: 720p 30fps"/>
+
+                    <TextBlock Text="QUALIDADE" Style="{StaticResource SectionHeaderTextStyle}" Margin="0,16,0,0"/>
+                    <ComboBox x:Name="QualityCombo" Margin="0,6,0,0">
+                        <ComboBoxItem Content="1080p · 30 fps" IsSelected="True"/>
+                        <ComboBoxItem Content="1080p · 60 fps"/>
+                        <ComboBoxItem Content="720p · 60 fps"/>
+                        <ComboBoxItem Content="720p · 30 fps"/>
                     </ComboBox>
+                    <TextBlock Style="{StaticResource CaptionTextStyle}" Margin="0,8,0,0"
+                               Text="Trocar a qualidade durante a transmissão vale na hora."/>
                 </StackPanel>
-
-                <StackPanel Grid.Column="4" VerticalAlignment="Center" Width="132">
-                    <TextBlock Text="VOLUME DA SALA" Style="{StaticResource SectionHeaderTextStyle}"/>
-                    <Slider x:Name="MasterVolumeSlider" Minimum="0" Maximum="100" Value="100"
-                            Margin="0,6,0,0" ValueChanged="OnMasterVolumeChanged"/>
-                    <TextBlock x:Name="MasterVolumeText" Text="100%" Style="{StaticResource CaptionTextStyle}"
-                               HorizontalAlignment="Right"/>
-                </StackPanel>
-
-            </Grid>
-        </Border>
-
-        <!-- Grade de telas compartilhadas -->
-        <Grid Grid.Row="1" Margin="16">
-            <Border x:Name="ReconnectBanner" Visibility="Collapsed" Panel.ZIndex="10"
-                    Background="{StaticResource DangerSoftBrush}" BorderBrush="{StaticResource DangerBrush}"
-                    BorderThickness="1" CornerRadius="10" Padding="16,10"
-                    HorizontalAlignment="Center" VerticalAlignment="Top" Margin="0,4,0,0">
-                <TextBlock x:Name="ReconnectBannerText" Foreground="{StaticResource TextPrimaryBrush}"
-                           FontSize="12" FontWeight="SemiBold"/>
             </Border>
+        </Popup>
 
-            <TextBlock x:Name="EmptyStateText"
-                       Text="Ninguém está compartilhando a tela ainda.&#10;Clique em “Compartilhar minha tela” pra começar."
-                       Style="{StaticResource CaptionTextStyle}" TextAlignment="Center"
-                       HorizontalAlignment="Center" VerticalAlignment="Center"/>
-
-            <!-- Os tiles têm tamanho calculado em RelayoutTiles(): antes um único participante
-                 esticava pra ocupar a área inteira e ficava desproporcional. -->
-            <ScrollViewer x:Name="TilesScroll" VerticalScrollBarVisibility="Auto"
-                          HorizontalScrollBarVisibility="Disabled">
-                <Grid MinHeight="{Binding ViewportHeight, ElementName=TilesScroll}">
-                    <WrapPanel x:Name="TilesGrid" HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                </Grid>
-            </ScrollViewer>
-        </Grid>
-
-        <!-- Barra de controles: status à esquerda, ações à direita. As ações moravam no
-             cabeçalho e disputavam largura com áudio/volume/participantes; aqui embaixo (como
-             em Meet/Discord/Teams) cabem folgadas mesmo na largura mínima da janela. -->
-        <Border Grid.Row="2" Background="{StaticResource SurfaceBrush}" BorderBrush="{StaticResource BorderBrush2}"
-                BorderThickness="0,1,0,0" Padding="20,12">
-            <Grid>
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="*"/>
-                    <ColumnDefinition Width="Auto"/>
-                </Grid.ColumnDefinitions>
-
-                <TextBlock x:Name="StatusText" Grid.Column="0" Style="{StaticResource CaptionTextStyle}"
-                           TextWrapping="Wrap" VerticalAlignment="Center" Margin="0,0,16,0"/>
-
-                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
-                    <!-- Desabilitado até detectar o encoder (fim do OnLoaded): ligar antes disso
-                         cairia no libx264 mesmo com placa de vídeo disponível. -->
-                    <Button x:Name="CameraButton" Content="Ligar câmera"
-                            Style="{StaticResource SecondaryButtonStyle}" IsEnabled="False"
-                            Click="OnCameraClick" Margin="0,0,10,0"/>
-                    <Button x:Name="ShareAgainButton" Content="Compartilhar de novo"
-                            Style="{StaticResource SecondaryButtonStyle}" Visibility="Collapsed"
-                            Click="OnShareAgainClick" Margin="0,0,10,0"/>
-                    <Button x:Name="ShareButton" Content="Compartilhar minha tela"
-                            Click="OnShareClick" MinWidth="180"/>
-                    <Button x:Name="StopShareButton" Content="Parar" Style="{StaticResource DangerButtonStyle}"
-                            Click="OnStopShareClick" Visibility="Collapsed" MinWidth="90"/>
-                    <Button x:Name="LeaveRoomButton" Content="Sair da sala"
-                            Style="{StaticResource SecondaryButtonStyle}"
-                            Click="OnLeaveRoomClick" Margin="20,0,0,0"/>
+        <!-- Disposição das telas. -->
+        <Popup x:Name="LayoutPopup" PlacementTarget="{Binding ElementName=LayoutButton}"
+               Placement="Bottom" StaysOpen="False" AllowsTransparency="True" PopupAnimation="Fade">
+            <Border Style="{StaticResource FlyoutStyle}" Width="270" Padding="8">
+                <StackPanel>
+                    <TextBlock Text="DISPOSIÇÃO DAS TELAS" Style="{StaticResource SectionHeaderTextStyle}"
+                               Margin="8,6,8,6"/>
+                    <Button x:Name="LayoutAutoItem" Content="Automática (grade)" Tag="&#xF0E2;"
+                            Style="{StaticResource MenuItemButtonStyle}" Click="OnLayoutAutoClick"/>
+                    <Button x:Name="LayoutFocusItem" Content="Foco (uma grande + miniaturas)" Tag="&#xE8A1;"
+                            Style="{StaticResource MenuItemButtonStyle}" Click="OnLayoutFocusClick"/>
+                    <Button x:Name="LayoutFreeItem" Content="Livre (arraste e redimensione)" Tag="&#xE7C2;"
+                            Style="{StaticResource MenuItemButtonStyle}" Click="OnLayoutFreeClick"/>
+                    <TextBlock Style="{StaticResource CaptionTextStyle}" Margin="8,8,8,6" TextWrapping="Wrap"
+                               Text="Arrastar ou redimensionar uma tela já passa pro modo livre. As bordas grudam umas nas outras; segure Alt pra soltar, Shift pra manter a proporção."/>
                 </StackPanel>
-            </Grid>
-        </Border>
+            </Border>
+        </Popup>
 
-        <!-- Camada de tela cheia: recebe o tile escolhido por cima de tudo -->
-        <Grid x:Name="FullscreenHost" Grid.Row="0" Grid.RowSpan="3" Background="Black"
-              Visibility="Collapsed"/>
         <!-- Qual câmera ligar, quando a máquina tem mais de uma. -->
         <Popup x:Name="CameraPickerPopup" PlacementTarget="{Binding ElementName=CameraButton}"
-               Placement="Top" StaysOpen="False" AllowsTransparency="True" PopupAnimation="Fade"
-               VerticalOffset="-6">
-            <Border Background="{StaticResource SurfaceBrush}" BorderBrush="{StaticResource BorderBrush2}"
-                    BorderThickness="1" CornerRadius="10" Padding="10" MinWidth="240">
+               Placement="Top" StaysOpen="False" AllowsTransparency="True" PopupAnimation="Fade">
+            <Border Style="{StaticResource FlyoutStyle}" MinWidth="240" Padding="10">
                 <StackPanel>
                     <TextBlock Text="QUAL CÂMERA?" Style="{StaticResource SectionHeaderTextStyle}"
                                Margin="4,2,4,8"/>
@@ -171,8 +291,7 @@
         <!-- Volume de uma tela só. Abre com botão direito em cima da tela da pessoa. -->
         <Popup x:Name="VolumePopup" Placement="MousePoint" StaysOpen="False" AllowsTransparency="True"
                PopupAnimation="Fade">
-            <Border Background="{StaticResource SurfaceBrush}" BorderBrush="{StaticResource BorderBrush2}"
-                    BorderThickness="1" CornerRadius="10" Padding="14" Width="248">
+            <Border Style="{StaticResource FlyoutStyle}" Width="248">
                 <StackPanel>
                     <TextBlock x:Name="VolumePopupTitle" FontSize="13" FontWeight="SemiBold"
                                TextTrimming="CharacterEllipsis"/>

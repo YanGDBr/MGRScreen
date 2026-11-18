@@ -4,7 +4,21 @@ public enum MediaChunkType : byte
 {
     Video = 1,       // vídeo da tela
     Audio = 2,
-    CameraVideo = 3, // vídeo da câmera (sem áudio próprio: a voz de todo mundo já vai pelo Discord)
+    CameraVideo = 3, // vídeo da câmera (sem áudio próprio)
+
+    // Protocolo 3: microfone. Separado do Audio (2) porque aquele é o som da TELA e só existe
+    // amarrado ao stream de tela de quem compartilha; a voz vale pra quem não compartilha nada.
+    // Só vai pra quem entrou com o protocolo 3 — o Android derruba a conexão ao ver um tipo fora
+    // de 0x81..0x83.
+    Voice = 4,
+}
+
+/// <summary>Formato fixo da voz: PCM 16-bit little-endian. Fixo de propósito — sem stream
+/// anunciado não há onde negociar formato, e 16 kHz mono sobra pra fala (32 KB/s por pessoa).</summary>
+public static class VoiceFormat
+{
+    public const int SampleRate = 16000;
+    public const int Channels = 1;
 }
 
 /// <summary>

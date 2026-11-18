@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
+using System.Security.Cryptography;
 using System.Threading.Channels;
 
 namespace MGRScreen.Core.Networking;
@@ -31,12 +32,20 @@ public sealed class RoomServer : IDisposable
     private readonly ConcurrentDictionary<int, Participant> _participants = new();
     private int _nextParticipantId;
 
-    public RoomServer(string hostNickname, int controlPort, int mediaPort)
+    // null = sala aberta. Fica só na memória do anfitrião e nunca vai pra rede (ver
+    // RoomFeatures.PasswordProof).
+    private readonly string? _password;
+
+    public RoomServer(string hostNickname, int controlPort, int mediaPort, string? password = null)
     {
         _hostNickname = hostNickname;
         _controlPort = controlPort;
         _mediaPort = mediaPort;
+        _password = string.IsNullOrEmpty(password) ? null : password;
     }
+
+    /// <summary>A sala só aceita quem souber a senha (e, portanto, só clientes do protocolo 3).</summary>
+    public bool RequiresPassword => _password is not null;
 
     public int ParticipantCount => _participants.Count;
 
@@ -79,7 +88,7 @@ public sealed class RoomServer : IDisposable
         // achando ela, e entrar pelo IP funciona igual.
         try
         {
-            _beacon = new SessionBeacon(_hostNickname, _controlPort, _mediaPort, () => ParticipantCount);
+            _beacon = new SessionBeacon(_hostNickname, _controlPort, _mediaPort, () => ParticipantCount, RequiresPassword);
             _beacon.Start();
         }
         catch (SocketException ex)
@@ -211,6 +220,14 @@ public sealed class RoomServer : IDisposable
                     MediaPort = _mediaPort,
                 };
 
+                // Só conta da senha pra quem perguntou já no protocolo 3: a resposta que os
+                // clientes antigos recebem continua exatamente a de antes.
+                if (join.ProtocolVersion >= RoomFeatures.Version)
+                {
+                    reply.ProtocolVersion = RoomFeatures.Version;
+                    reply.RequiresPassword = RequiresPassword;
+                }
+
                 await MessageFraming.WriteMessageAsync(stream, reply.ToJsonBytes(), token);
                 client.Dispose();
                 return;
@@ -230,17 +247,59 @@ public sealed class RoomServer : IDisposable
                 return;
             }
 
-            var id = Interlocked.Increment(ref _nextParticipantId);
-            var nickname = string.IsNullOrWhiteSpace(join.Nickname) ? $"Amigo {id}" : join.Nickname!.Trim();
-            var mediaToken = Guid.NewGuid().ToString("N");
+            // A versão que vale pra este participante. O cliente novo manda ProtocolVersion = 2
+            // (pra servidores antigos o aceitarem como sempre) e a versão de verdade em
+            // MaxProtocolVersion; quem mandar direto ProtocolVersion >= 3 é tratado igual.
+            var version = Math.Min(Math.Max(join.ProtocolVersion, join.MaxProtocolVersion), RoomFeatures.Version);
 
-            if (join.ViewerOnly && join.ProtocolVersion != 2)
+            if (join.ViewerOnly && version < RoomFeatures.TimedMediaVersion)
             {
                 await MessageFraming.WriteMessageAsync(stream, RoomEnvelope.Rejected("Versão do visualizador incompatível.").ToJsonBytes(), token);
                 return;
             }
 
-            participant = new Participant(id, nickname, client, stream, join.ProtocolVersion == 2, join.ViewerOnly,
+            if (_password is not null)
+            {
+                // Cliente antigo não sabe responder ao desafio (nem conhece a mensagem), então
+                // recebe a recusa de sempre, com um texto que ele já sabe mostrar.
+                if (version < RoomFeatures.Version)
+                {
+                    await MessageFraming.WriteMessageAsync(stream, RoomEnvelope.Rejected(
+                        "Esta sala é protegida por senha. Atualize o MGRScreen para poder entrar.").ToJsonBytes(), handshake.Token);
+                    return;
+                }
+
+                var nonce = RandomNumberGenerator.GetBytes(32);
+                await MessageFraming.WriteMessageAsync(stream, new RoomEnvelope
+                {
+                    Kind = RoomMessageKind.JoinChallenge,
+                    Nonce = Convert.ToBase64String(nonce),
+                }.ToJsonBytes(), handshake.Token);
+
+                var authBytes = await MessageFraming.ReadMessageAsync(stream, handshake.Token);
+                if (authBytes is null)
+                    return; // desistiu (o cliente sem senha fecha aqui pra perguntar ao usuário)
+
+                var auth = RoomEnvelope.FromJsonBytes(authBytes);
+                var proof = new byte[32];
+                var valid = auth.Kind == RoomMessageKind.JoinAuth && auth.Proof is not null &&
+                    Convert.TryFromBase64String(auth.Proof, proof, out var written) && written == proof.Length;
+
+                // Tempo constante: a demora da comparação não pode revelar quantos bytes bateram.
+                if (!valid || !CryptographicOperations.FixedTimeEquals(proof, RoomFeatures.PasswordProof(_password, nonce)))
+                {
+                    var wrong = RoomEnvelope.Rejected("Senha incorreta.");
+                    wrong.RequiresPassword = true;
+                    await MessageFraming.WriteMessageAsync(stream, wrong.ToJsonBytes(), handshake.Token);
+                    return;
+                }
+            }
+
+            var id = Interlocked.Increment(ref _nextParticipantId);
+            var nickname = string.IsNullOrWhiteSpace(join.Nickname) ? $"Amigo {id}" : join.Nickname!.Trim();
+            var mediaToken = Guid.NewGuid().ToString("N");
+
+            participant = new Participant(id, nickname, client, stream, version, join.ViewerOnly,
                 n => Interlocked.Add(ref _bytesRelayed, n));
             await participant.ControlWriteLock.WaitAsync(handshake.Token);
             _participants[id] = participant;
@@ -249,7 +308,9 @@ public sealed class RoomServer : IDisposable
             try
             {
                 var accepted = RoomEnvelope.Accepted(id, mediaToken, SnapshotParticipants(), SnapshotStreams());
-                accepted.ProtocolVersion = participant.SupportsTimedMedia ? 2 : 0;
+                // Quem entrou com a 2 recebe exatamente 2 de volta (o Android exige), e o
+                // legado continua recebendo 0.
+                accepted.ProtocolVersion = participant.SupportsTimedMedia ? version : 0;
                 await MessageFraming.WriteMessageAsync(stream, accepted.ToJsonBytes(), handshake.Token);
             }
             finally
@@ -342,9 +403,47 @@ public sealed class RoomServer : IDisposable
                         StreamKind = message.StreamKind,
                     }, exceptParticipantId: participant.Id);
                     break;
+
+                case RoomMessageKind.Chat when participant.SupportsRoomFeatures && !string.IsNullOrWhiteSpace(message.Text):
+                    // Apelido e horário saem daqui, não do que o cliente mandou. O remetente
+                    // também recebe: o eco é a confirmação de entrega. O lock faz todo mundo ver
+                    // as mensagens na mesma ordem — cada conexão é lida por uma task diferente, e
+                    // sem ele duas mensagens quase simultâneas podiam chegar trocadas pra parte
+                    // da sala. (A fila de cada participante é o ControlWriteLock, que atende na
+                    // ordem de chegada; o que o lock garante é que essa ordem seja a mesma em todos.)
+                    lock (_chatOrder)
+                    {
+                        BroadcastControl(new RoomEnvelope
+                        {
+                            Kind = RoomMessageKind.Chat,
+                            ParticipantId = participant.Id,
+                            Nickname = participant.Nickname,
+                            Text = RoomFeatures.ClampChat(message.Text!),
+                            SentAtUnixMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                        }, roomFeaturesOnly: true);
+                    }
+                    break;
+
+                // O conteúdo é opaco: o servidor só confere tamanho e taxa. Não volta pro
+                // remetente — ele já desenhou o próprio traço na hora.
+                case RoomMessageKind.Annotation when participant.SupportsRoomFeatures &&
+                    Enum.IsDefined(message.StreamKind) && RoomFeatures.AnnotationFits(message.Payload) &&
+                    participant.AllowAnnotation():
+                    BroadcastControl(new RoomEnvelope
+                    {
+                        Kind = RoomMessageKind.Annotation,
+                        ParticipantId = participant.Id,
+                        Nickname = participant.Nickname,
+                        TargetParticipantId = message.TargetParticipantId,
+                        StreamKind = message.StreamKind,
+                        Payload = message.Payload,
+                    }, exceptParticipantId: participant.Id, roomFeaturesOnly: true);
+                    break;
             }
         }
     }
+
+    private readonly object _chatOrder = new();
 
     private async Task HandleMediaClientAsync(TcpClient client, CancellationToken token)
     {
@@ -398,9 +497,11 @@ public sealed class RoomServer : IDisposable
                 var length = MediaFraming.ReadLength(header);
                 var timed = TimedMedia.IsTimed(header);
                 var type = TimedMedia.Type(header);
+                var voice = type == MediaChunkType.Voice;
                 if (participant.ViewerOnly || !Enum.IsDefined(type) ||
                     length is <= 0 or > TimedMedia.MaxPayload + TimedMedia.PrefixSize ||
-                    (timed && (!participant.SupportsTimedMedia || length <= TimedMedia.PrefixSize)))
+                    (timed && (!participant.SupportsTimedMedia || length <= TimedMedia.PrefixSize)) ||
+                    (voice && !(timed && participant.SupportsRoomFeatures)))
                 {
                     break;
                 }
@@ -414,6 +515,14 @@ public sealed class RoomServer : IDisposable
 
                 // Carimba quem originou (o cliente manda 0) e repassa pros outros.
                 MediaFraming.StampPublisher(framed, participant.Id);
+                if (voice)
+                {
+                    // A voz não pertence a stream nenhum: não tem geração pra conferir e segue
+                    // um caminho próprio de repasse.
+                    if (length - TimedMedia.PrefixSize <= RoomFeatures.MaxVoiceChunkBytes)
+                        RelayVoice(framed, participant.Id);
+                    continue;
+                }
                 if (timed)
                 {
                     var info = type == MediaChunkType.CameraVideo ? participant.CameraStream : participant.ScreenStream;
@@ -450,13 +559,30 @@ public sealed class RoomServer : IDisposable
         }
     }
 
-    private void BroadcastControl(RoomEnvelope message, int exceptParticipantId = 0)
+    /// <summary>
+    /// Voz vai pra todos os outros do protocolo 3, estejam ou não assistindo a algum stream — e
+    /// só pra eles: cliente antigo não conhece o tipo (o Android derruba a conexão ao recebê-lo).
+    /// </summary>
+    private void RelayVoice(byte[] framed, int senderId)
+    {
+        byte[]? legacy = null;
+        foreach (var (id, participant) in _participants)
+        {
+            if (id == senderId || !participant.SupportsRoomFeatures)
+                continue;
+            // Mesmo formato em que cada um já recebe o resto: desktop sem o prefixo de tempo.
+            participant.TryEnqueueMedia(participant.ViewerOnly ? framed : legacy ??= TimedMedia.ToLegacy(framed));
+        }
+    }
+
+    /// <param name="roomFeaturesOnly">Mensagem do protocolo 3: só vai pra quem entrou com ele.</param>
+    private void BroadcastControl(RoomEnvelope message, int exceptParticipantId = 0, bool roomFeaturesOnly = false)
     {
         var bytes = message.ToJsonBytes();
 
         foreach (var (id, participant) in _participants)
         {
-            if (id == exceptParticipantId)
+            if (id == exceptParticipantId || (roomFeaturesOnly && !participant.SupportsRoomFeatures))
             {
                 continue;
             }
@@ -565,6 +691,10 @@ public sealed class RoomServer : IDisposable
         public string Nickname { get; }
         public NetworkStream ControlStream { get; }
         public bool SupportsTimedMedia { get; }
+
+        /// <summary>Entrou com o protocolo 3: pode receber chat, anotações e voz. Tudo que é
+        /// novo passa por esta checagem antes de ser enviado.</summary>
+        public bool SupportsRoomFeatures { get; }
         public bool ViewerOnly { get; }
         public SemaphoreSlim ControlWriteLock { get; } = new(1, 1);
 
@@ -606,14 +736,15 @@ public sealed class RoomServer : IDisposable
         private readonly Action<int> _countRelayed;
 
         public Participant(int id, string nickname, TcpClient controlClient, NetworkStream controlStream,
-            bool supportsTimedMedia, bool viewerOnly, Action<int> countRelayed)
+            int protocolVersion, bool viewerOnly, Action<int> countRelayed)
         {
             Id = id;
             Nickname = nickname;
             _countRelayed = countRelayed;
             _controlClient = controlClient;
             ControlStream = controlStream;
-            SupportsTimedMedia = supportsTimedMedia;
+            SupportsTimedMedia = protocolVersion >= RoomFeatures.TimedMediaVersion;
+            SupportsRoomFeatures = protocolVersion >= RoomFeatures.Version;
             ViewerOnly = viewerOnly;
         }
 
@@ -664,7 +795,9 @@ public sealed class RoomServer : IDisposable
             {
                 if (_disposed)
                     return;
-                if (ViewerOnly && (_subscription is not { } sub || sub.Publisher != key.Item1 ||
+                // A assinatura do espectador escolhe UM stream pra assistir; a voz não é de
+                // stream nenhum e passa direto, mesmo sem assinatura.
+                if (ViewerOnly && type != MediaChunkType.Voice && (_subscription is not { } sub || sub.Publisher != key.Item1 ||
                     (isVideo ? type != MediaFraming.VideoTypeFor(sub.Kind) : !sub.Audio)))
                     return;
 
@@ -682,6 +815,26 @@ public sealed class RoomServer : IDisposable
                     Interlocked.Increment(ref _dropCount);
                 }
             }
+        }
+
+        private long _annotationWindowStart;
+        private int _annotationsInWindow;
+
+        /// <summary>
+        /// Limite de taxa das anotações, em janelas de 1 s: o que passar do limite na janela é
+        /// descartado. Um traço normal manda poucas dezenas de pontos por segundo; isto existe
+        /// pra um cliente com defeito não afogar o canal de controle de todo mundo. Só é chamado
+        /// pela task que lê o canal de controle deste participante, então não precisa de lock.
+        /// </summary>
+        public bool AllowAnnotation()
+        {
+            var now = Environment.TickCount64;
+            if (now - _annotationWindowStart >= 1000)
+            {
+                _annotationWindowStart = now;
+                _annotationsInWindow = 0;
+            }
+            return ++_annotationsInWindow <= RoomFeatures.MaxAnnotationsPerSecond;
         }
 
         private int _dropCount;

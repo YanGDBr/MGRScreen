@@ -38,6 +38,67 @@ public sealed class AppSettings
     /// <summary>Última câmera usada — aparece primeiro na lista quando há mais de uma.</summary>
     public string LastCameraId { get; set; } = "";
 
+    // ---------------------------------------------------------------- aparência
+
+    /// <summary>Cor de destaque em hexadecimal (#RRGGBB). O resto da paleta não muda.</summary>
+    public string AccentColor { get; set; } = "#7C5CFF";
+
+    // ---------------------------------------------------------------- disposição das telas
+
+    /// <summary>"auto" (grade calculada), "focus" (uma grande + miniaturas) ou "free"
+    /// (cada tela onde a pessoa deixou).</summary>
+    public string LayoutMode { get; set; } = "auto";
+
+    /// <summary>Posição e tamanho de cada tela no modo livre, em fração da área (x, y, largura,
+    /// altura de 0 a 1), guardados por "nickname|tipo" — o id do participante muda a cada
+    /// conexão.</summary>
+    public Dictionary<string, double[]> FreeLayout { get; set; } = new();
+
+    public bool ChatPanelOpen { get; set; }
+
+    // ---------------------------------------------------------------- comportamento
+
+    public bool MinimizeToTray { get; set; } = true;
+    public bool Notifications { get; set; } = true;
+    public bool CheckUpdates { get; set; } = true;
+
+    /// <summary>Já viu a explicação de primeiro uso.</summary>
+    public bool OnboardingDone { get; set; }
+
+    // ---------------------------------------------------------------- atalhos e voz
+
+    public string HotkeyToggleShare { get; set; } = "Ctrl+Alt+S";
+    public string HotkeyToggleMic { get; set; } = "Ctrl+Alt+M";
+
+    /// <summary>0 = apertar pra falar · 1 = ativação por voz · 2 = microfone sempre aberto ·
+    /// 3 = não usar o microfone (o botão some da sala).</summary>
+    public int VoiceMode { get; set; }
+    public string PushToTalkKey { get; set; } = "F9";
+    public string MicDeviceId { get; set; } = "";
+
+    // ---------------------------------------------------------------- pastas
+
+    public string RecordingsFolder { get; set; } = "";
+    public string ScreenshotsFolder { get; set; } = "";
+
+    [System.Text.Json.Serialization.JsonIgnore]
+    public string EffectiveRecordingsFolder => string.IsNullOrWhiteSpace(RecordingsFolder)
+        ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyVideos), "MGRScreen")
+        : RecordingsFolder;
+
+    [System.Text.Json.Serialization.JsonIgnore]
+    public string EffectiveScreenshotsFolder => string.IsNullOrWhiteSpace(ScreenshotsFolder)
+        ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyPictures), "MGRScreen")
+        : ScreenshotsFolder;
+
+    /// <summary>Uma instância só pro app inteiro. Antes cada janela carregava a sua e, ao salvar,
+    /// uma sobrescrevia o que a outra tinha mudado.</summary>
+    public static AppSettings Current { get; } = Load();
+
+    /// <summary>Avisa quem estiver aberto que algo mudou na tela de configurações.</summary>
+    public static event Action? Changed;
+    public static void NotifyChanged() => Changed?.Invoke();
+
     private static string FilePath => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
         "MGRScreen",

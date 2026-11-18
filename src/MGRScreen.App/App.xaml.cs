@@ -8,9 +8,17 @@ public partial class App : Application
 {
     private static readonly string CrashLogPath = Path.Combine(Path.GetTempPath(), "mgrscreen_crash.log");
 
+    /// <summary>Convite recebido na linha de comando, consumido pelo menu ao abrir.</summary>
+    public static InviteLink? PendingInvite { get; set; }
+
     protected override void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
+
+        Theme.ThemeManager.Apply(AppSettings.Current.AccentColor);
+
+        // Aberto por um link de convite (mgrscreen://endereço): o menu já tenta entrar na sala.
+        PendingInvite = InviteLink.TryParse(e.Args.FirstOrDefault());
 
         // Sem isso, uma exceção não tratada num "async void" (ex: handler de clique de botão)
         // derruba o processo inteiro sem deixar rastro — foi o que causava o crash ao clicar em

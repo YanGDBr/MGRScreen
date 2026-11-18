@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace MGRScreen.Core.Networking;
 
@@ -20,6 +21,62 @@ public enum RoomMessageKind
     Pong,
     Subscribe,
     Unsubscribe,
+
+    // Protocolo 3. O servidor só manda estes tipos a quem entrou anunciando a versão 3: os
+    // clientes 1.0.x e o visualizador Android não os conhecem. Os valores numéricos anteriores
+    // não mudam (o enum vai como número no JSON), por isso os novos entram sempre no fim.
+    JoinChallenge,      // servidor -> cliente: a sala tem senha; segue o nonce do desafio
+    JoinAuth,           // cliente -> servidor: HMAC-SHA256(senha, nonce)
+    Chat,               // cliente -> servidor: texto; servidor -> todos: texto carimbado
+    Annotation,         // cliente -> servidor -> os outros: desenho/ponteiro sobre a tela de alguém
+}
+
+/// <summary>Uma mensagem do chat da sala. Apelido e horário são carimbados pelo servidor.</summary>
+public sealed record ChatMessage(int ParticipantId, string Nickname, string Text, DateTime SentAtUtc);
+
+/// <summary>Um desenho (ou ponteiro laser) de alguém sobre o stream de outra pessoa. O
+/// <paramref name="Payload"/> é opaco pra rede: quem define o formato é a interface.</summary>
+public sealed record AnnotationMessage(
+    int FromParticipantId, string FromNickname, int TargetParticipantId, StreamKind TargetKind, string Payload);
+
+/// <summary>Versões e limites do protocolo da sala, num lugar só pra cliente e servidor
+/// concordarem.</summary>
+internal static class RoomFeatures
+{
+    /// <summary>Mídia com timestamp, Ping/Pong e assinatura seletiva (ver docs/PROTOCOL_V2.md).</summary>
+    public const int TimedMediaVersion = 2;
+
+    /// <summary>Senha, chat, anotações e voz.</summary>
+    public const int Version = 3;
+
+    public const int MaxChatLength = 2000;
+    public const int MaxAnnotationBytes = 16 * 1024;
+    public const int MaxAnnotationsPerSecond = 60;
+
+    /// <summary>2 s de voz. Um pedaço normal tem 20–40 ms; acima disto é cliente com defeito.</summary>
+    public const int MaxVoiceChunkBytes = 2 * VoiceFormat.SampleRate * VoiceFormat.Channels * 2;
+
+    /// <summary>
+    /// A senha nunca trafega: o servidor sorteia um nonce por tentativa de entrada e o cliente
+    /// devolve HMAC-SHA256(chave = senha em UTF-8, mensagem = nonce). Como o nonce muda a cada
+    /// conexão, capturar uma resposta não serve pra entrar depois. Não é proteção contra quem
+    /// grampeia a rede e tenta adivinhar a senha offline (o resto do tráfego também não é
+    /// cifrado) — o objetivo é só não deixar a senha passar em claro.
+    /// </summary>
+    public static byte[] PasswordProof(string password, byte[] nonce) =>
+        System.Security.Cryptography.HMACSHA256.HashData(System.Text.Encoding.UTF8.GetBytes(password), nonce);
+
+    /// <summary>Corta no limite do chat sem partir um par substituto (emoji) ao meio.</summary>
+    public static string ClampChat(string text)
+    {
+        if (text.Length <= MaxChatLength)
+            return text;
+        var length = char.IsHighSurrogate(text[MaxChatLength - 1]) ? MaxChatLength - 1 : MaxChatLength;
+        return text[..length];
+    }
+
+    public static bool AnnotationFits(string? payload) =>
+        !string.IsNullOrEmpty(payload) && System.Text.Encoding.UTF8.GetByteCount(payload) <= MaxAnnotationBytes;
 }
 
 public sealed class ParticipantInfo
@@ -86,6 +143,48 @@ public sealed class RoomEnvelope
     public int ProtocolVersion { get; set; }
     public bool ViewerOnly { get; set; }
     public bool IncludeAudio { get; set; }
+
+    // Campos do protocolo 3. Todos somem do JSON quando estão no valor padrão: assim as
+    // mensagens que os clientes antigos recebem continuam byte a byte iguais às de antes, sem
+    // depender de como cada um trata uma chave desconhecida.
+
+    /// <summary>
+    /// A maior versão que quem está entrando fala (só no Join). O cliente novo continua mandando
+    /// <see cref="ProtocolVersion"/> = 2 e anuncia a 3 aqui, porque um servidor 1.0.x compara
+    /// ProtocolVersion == 2: mandar 3 lá faria ele nos tratar como cliente legado (sem timestamp,
+    /// sem Ping/Pong e invisível pro Android). Assim o servidor antigo ignora este campo e responde
+    /// 2 como sempre; o novo responde 3.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public int MaxProtocolVersion { get; set; }
+
+    /// <summary>Na descoberta: a sala tem senha. No JoinRejected: a recusa foi por causa da senha.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public bool RequiresPassword { get; set; }
+
+    /// <summary>Nonce do desafio de senha, em Base64 (JoinChallenge).</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public string? Nonce { get; set; }
+
+    /// <summary>Resposta ao desafio, em Base64 (JoinAuth).</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public string? Proof { get; set; }
+
+    /// <summary>Texto do chat.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public string? Text { get; set; }
+
+    /// <summary>Horário em que o servidor recebeu a mensagem de chat (ms desde 1970, UTC).</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public long SentAtUnixMs { get; set; }
+
+    /// <summary>Anotação: de quem é o stream anotado (o tipo dele vai em <see cref="StreamKind"/>).</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public int TargetParticipantId { get; set; }
+
+    /// <summary>Conteúdo da anotação, opaco pra rede.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public string? Payload { get; set; }
 
     public byte[] ToJsonBytes() => System.Text.Encoding.UTF8.GetBytes(JsonSerializer.Serialize(this));
 

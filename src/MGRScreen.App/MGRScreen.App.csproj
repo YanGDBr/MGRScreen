@@ -7,8 +7,10 @@
     <Platforms>x64</Platforms>
     <RootNamespace>MGRScreen.App</RootNamespace>
     <AssemblyName>MGRScreen</AssemblyName>
-    <Version>1.0.2</Version>
+    <Version>1.1.0</Version>
     <UseWPF>true</UseWPF>
+    <!-- Só pelo NotifyIcon (ícone na bandeja), que o WPF não tem. -->
+    <UseWindowsForms>true</UseWindowsForms>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
 
@@ -20,6 +22,13 @@
          soma alguns MB. Sem efeito nas mensagens do NOSSO app, só nas do runtime/WPF. -->
     <SatelliteResourceLanguages>pt-BR</SatelliteResourceLanguages>
   </PropertyGroup>
+
+  <ItemGroup>
+    <!-- UseWindowsForms traz usings implícitos que colidem com os tipos do WPF (Application,
+         Button, MessageBox, Color...). Quem usa WinForms/System.Drawing escreve o nome completo. -->
+    <Using Remove="System.Windows.Forms" />
+    <Using Remove="System.Drawing" />
+  </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\MGRScreen.Core\MGRScreen.Core.csproj" />

@@ -31,7 +31,7 @@ public partial class RoomWindow : Window
 
     /// <summary>Toca o áudio de todo mundo por uma saída só, com volume por pessoa.</summary>
     private readonly RemoteAudioMixer _audioMixer = new();
-    private readonly AppSettings _settings = AppSettings.Load();
+    private readonly AppSettings _settings = AppSettings.Current;
     private StreamTile? _volumePopupTile;
 
     private readonly CameraCaptureService _camera = new();
@@ -100,9 +100,11 @@ public partial class RoomWindow : Window
 
     /// <param name="roomLabel">Como chamar esta sala no menu depois ("sala do Gui"). Quando vem
     /// da busca automática é o nickname do anfitrião; quando é IP digitado à mão, o próprio IP.</param>
-    public RoomWindow(string nickname, string hostAddress, RoomServer? ownedServer, string? roomLabel = null)
+    public RoomWindow(string nickname, string hostAddress, RoomServer? ownedServer, string? roomLabel = null, string? password = null)
     {
         InitializeComponent();
+        InitializeLayout();
+        _password = password;
 
         _nickname = nickname;
         _hostAddress = hostAddress;
@@ -161,8 +163,7 @@ public partial class RoomWindow : Window
         string? rejection;
         try
         {
-            rejection = await _client.ConnectAsync(
-                _hostAddress, MainWindow.ControlPort, MainWindow.MediaPort, _nickname);
+            rejection = await ConnectAskingPasswordAsync();
         }
         catch (Exception ex)
         {
@@ -188,6 +189,7 @@ public partial class RoomWindow : Window
             ConnectionInfoText.Text = "Conectado na sala.";
         }
         StatusText.Text = "Conectado.";
+        InitializeExtras();
 
         _settings.LastRoomAddress = _hostAddress;
         _settings.LastRoomHost = _ownedServer is not null ? "sua sala" : _roomLabel;
@@ -208,6 +210,7 @@ public partial class RoomWindow : Window
         client.ParticipantJoined += p => Dispatcher.BeginInvoke(() =>
         {
             StatusText.Text = $"{p.Nickname} entrou na sala.";
+            NotifyEvent($"{p.Nickname} entrou na sala.", "");
             UpdateParticipantsLabel();
         });
         client.ParticipantLeft += _ => Dispatcher.BeginInvoke(UpdateParticipantsLabel);
@@ -234,6 +237,7 @@ public partial class RoomWindow : Window
             }
         });
         client.VideoChunkReceived += OnRemoteVideoChunk;
+        WireRoomFeatureEvents(client);
         client.AudioChunkReceived += OnRemoteAudioChunk;
     }
 
@@ -305,7 +309,7 @@ public partial class RoomWindow : Window
             try
             {
                 rejection = await client.ConnectAsync(
-                    _hostAddress, MainWindow.ControlPort, MainWindow.MediaPort, _nickname);
+                    _hostAddress, MainWindow.ControlPort, MainWindow.MediaPort, _nickname, _password);
             }
             catch (Exception ex) when (ex is SocketException or IOException or InvalidDataException)
             {
@@ -334,6 +338,7 @@ public partial class RoomWindow : Window
 
             ReconnectBanner.Visibility = Visibility.Collapsed;
             StatusText.Text = "Reconectado.";
+            OnRoomFeaturesChanged();
             UpdateParticipantsLabel();
             _reconnecting = false;
             return;
@@ -400,6 +405,7 @@ public partial class RoomWindow : Window
 
     private async void OnShareClick(object sender, RoutedEventArgs e)
     {
+        _capture.CropRegion = null;
         StatusText.Text = "Escolha o monitor/janela na janela do Windows que vai abrir...";
         await StartCaptureAsync(() => _capture.StartAsync(new WindowInteropHelper(this).Handle));
     }
@@ -407,6 +413,7 @@ public partial class RoomWindow : Window
     /// <summary>Compartilha direto o mesmo monitor da última vez, sem abrir o seletor.</summary>
     private async void OnShareAgainClick(object sender, RoutedEventArgs e)
     {
+        _capture.CropRegion = null;
         var monitor = _settings.LastMonitorDeviceName;
         StatusText.Text = "Compartilhando o mesmo monitor da última vez...";
 
@@ -616,6 +623,7 @@ public partial class RoomWindow : Window
 
         var screenInfo = _myStreamInfo;
         _encoder.EncodedChunkReady += (frame, pts) => _client.SendVideoChunk(frame, pts, screenInfo);
+        _encoder.EncodedChunkReady += (frame, _) => RecordLocalChunk(frame);
         _ = _client.AnnounceStreamStartedAsync(_myStreamInfo);
 
         _isSharing = true;
@@ -1071,6 +1079,7 @@ public partial class RoomWindow : Window
         StatusText.Text = info.Kind == StreamKind.Camera
             ? $"{info.Nickname} ligou a câmera."
             : $"{info.Nickname} começou a compartilhar.";
+        NotifyEvent(StatusText.Text, "");
         UpdateParticipantsLabel();
     }
 
@@ -1152,6 +1161,8 @@ public partial class RoomWindow : Window
         {
             Interlocked.Add(ref tile.BytesReceived, chunk.Length);
 
+            tile.Recorder?.Write(chunk);
+
             var decoder = tile.Decoder;
             if (tile.Watching && decoder is not null)
             {
@@ -1165,301 +1176,6 @@ public partial class RoomWindow : Window
         if (_tiles.TryGetValue(TileKey(participantId, StreamKind.Screen), out var tile) && tile.Watching)
         {
             _audioMixer.Push(participantId, pcm16);
-        }
-    }
-
-    // ---------------------------------------------------------------- tiles
-
-    private StreamTile AddTile(int key, int participantId, StreamKind kind, string nickname, int width, int height, StreamInfo? info)
-    {
-        var image = new Image { Stretch = Stretch.Uniform };
-
-        // Preview da minha própria câmera espelhado, como todo app de vídeo faz (senão mexer a
-        // mão direita parece mexer a esquerda). Só aqui: os outros recebem a imagem normal.
-        if (participantId == LocalCameraTileId)
-        {
-            image.RenderTransformOrigin = new Point(0.5, 0.5);
-            image.RenderTransform = new ScaleTransform(-1, 1);
-        }
-
-        var placeholder = new TextBlock
-        {
-            Text = "Aguardando vídeo...",
-            Foreground = (Brush)FindResource("TextMutedBrush"),
-            FontSize = 12,
-            HorizontalAlignment = HorizontalAlignment.Center,
-            VerticalAlignment = VerticalAlignment.Center,
-            TextAlignment = TextAlignment.Center,
-        };
-
-        var label = new Border
-        {
-            Background = new SolidColorBrush(Color.FromArgb(170, 0, 0, 0)),
-            CornerRadius = new CornerRadius(6),
-            Padding = new Thickness(8, 4, 8, 4),
-            HorizontalAlignment = HorizontalAlignment.Left,
-            VerticalAlignment = VerticalAlignment.Bottom,
-            Margin = new Thickness(10),
-            Child = new TextBlock
-            {
-                Text = kind == StreamKind.Camera ? $"{nickname} · câmera" : nickname,
-                Foreground = Brushes.White,
-                FontSize = 12,
-                FontWeight = FontWeights.SemiBold,
-            },
-        };
-
-        Button MakeTileButton(string content) => new()
-        {
-            Style = (Style)FindResource("SecondaryButtonStyle"),
-            Padding = new Thickness(9, 3, 9, 3),
-            FontSize = 11,
-            Content = content,
-            Margin = new Thickness(6, 0, 0, 0),
-        };
-
-        var toggleButton = MakeTileButton("Parar de assistir");
-        var muteButton = MakeTileButton("Silenciar");
-        var fullscreenButton = MakeTileButton("Tela cheia");
-
-        // Preview local não toca áudio meu; câmera não tem áudio nenhum. Nos dois casos não há o
-        // que silenciar.
-        muteButton.Visibility = participantId < 0 || kind == StreamKind.Camera
-            ? Visibility.Collapsed
-            : Visibility.Visible;
-
-        var buttonsPanel = new StackPanel
-        {
-            Orientation = Orientation.Horizontal,
-            HorizontalAlignment = HorizontalAlignment.Right,
-            VerticalAlignment = VerticalAlignment.Top,
-            Margin = new Thickness(8),
-            Children = { toggleButton, muteButton, fullscreenButton },
-        };
-
-        var fpsText = new TextBlock
-        {
-            Foreground = (Brush)FindResource("TextSecondaryBrush"),
-            FontSize = 11,
-            HorizontalAlignment = HorizontalAlignment.Right,
-            VerticalAlignment = VerticalAlignment.Bottom,
-            Margin = new Thickness(12),
-        };
-
-        var root = new Border
-        {
-            Background = Brushes.Black,
-            CornerRadius = new CornerRadius(10),
-            BorderBrush = (Brush)FindResource("BorderBrush2"),
-            BorderThickness = new Thickness(1),
-            Margin = new Thickness(6),
-            ClipToBounds = true,
-            Child = new Grid { Children = { image, placeholder, label, buttonsPanel, fpsText } },
-        };
-
-        var tile = new StreamTile
-        {
-            Key = key,
-            Kind = kind,
-            ParticipantId = participantId,
-            Nickname = nickname,
-            Root = root,
-            Image = image,
-            Placeholder = placeholder,
-            FpsText = fpsText,
-            ToggleButton = toggleButton,
-            MuteButton = muteButton,
-            FullscreenButton = fullscreenButton,
-            Info = info,
-            Width = width,
-            Height = height,
-            Watching = true,
-            FrameSeconds = 1.0 / Math.Max(1, info?.Fps ?? (kind == StreamKind.Camera ? 30 : _capture.TargetFps)),
-        };
-        tile.UpdateToggleLabel();
-        tile.UpdateMuteLabel();
-
-        ApplySavedAudioPreference(tile);
-
-        toggleButton.Click += (_, _) => OnToggleWatchClick(tile);
-        muteButton.Click += (_, _) => OnToggleMuteClick(tile);
-        fullscreenButton.Click += (_, _) => ToggleFullscreen(tile);
-
-        // Botão direito na tela da pessoa abre o volume dela (câmera não tem áudio).
-        if (participantId >= 0 && kind == StreamKind.Screen)
-        {
-            root.MouseRightButtonUp += (_, e) =>
-            {
-                e.Handled = true;
-                OpenVolumePopup(tile);
-            };
-        }
-
-        // Duplo clique na imagem também alterna tela cheia (é o gesto que todo mundo tenta).
-        root.MouseLeftButtonDown += (_, e) =>
-        {
-            if (e.ClickCount == 2)
-            {
-                ToggleFullscreen(tile);
-            }
-        };
-
-        _tiles[key] = tile;
-        TilesGrid.Children.Add(root);
-        RelayoutTiles();
-
-        return tile;
-    }
-
-    private void RemoveTile(int key)
-    {
-        if (!_tiles.TryRemove(key, out var tile))
-        {
-            return;
-        }
-
-        if (_fullscreenTile == tile)
-        {
-            ExitFullscreen();
-        }
-
-        TilesGrid.Children.Remove(tile.Root);
-        if (tile.Kind == StreamKind.Screen && !tile.IsLocal)
-        {
-            _audioMixer.RemoveParticipant(tile.ParticipantId);
-        }
-        tile.Dispose();
-        RelayoutTiles();
-        UpdateParticipantsLabel();
-    }
-
-    // ---------------------------------------------------------------- tela cheia
-
-    private void ToggleFullscreen(StreamTile tile)
-    {
-        if (_fullscreenTile == tile)
-        {
-            ExitFullscreen();
-        }
-        else
-        {
-            EnterFullscreen(tile);
-        }
-    }
-
-    private void EnterFullscreen(StreamTile tile)
-    {
-        if (_fullscreenTile is not null)
-        {
-            ExitFullscreen();
-        }
-
-        // Move o tile pra camada que cobre a janela inteira. Guardamos as aparências originais
-        // pra devolver tudo no lugar depois.
-        TilesGrid.Children.Remove(tile.Root);
-        tile.Root.Margin = new Thickness(0);
-        tile.Root.CornerRadius = new CornerRadius(0);
-        tile.Root.BorderThickness = new Thickness(0);
-        tile.Root.Width = double.NaN; // ocupa tudo em vez do tamanho calculado da grade
-        tile.Root.Height = double.NaN;
-        FullscreenHost.Children.Add(tile.Root);
-        FullscreenHost.Visibility = Visibility.Visible;
-
-        _previousWindowStyle = WindowStyle;
-        _previousWindowState = WindowState;
-        _previousResizeMode = ResizeMode;
-
-        // Marca ANTES de mexer na janela: maximizar dispara SizeChanged -> RelayoutTiles(), que
-        // reaplicaria o tamanho de grade justamente neste tile e ele não preencheria a tela.
-        _fullscreenTile = tile;
-
-        // Tela cheia de verdade (cobre a barra de tarefas).
-        WindowStyle = WindowStyle.None;
-        ResizeMode = ResizeMode.NoResize;
-        WindowState = WindowState.Normal; // garante a transição quando já está maximizada
-        WindowState = WindowState.Maximized;
-        tile.FullscreenButton.Content = "Sair (Esc)";
-        StatusText.Text = $"Tela cheia: {tile.Nickname}. Pressione Esc ou dê duplo clique pra sair.";
-    }
-
-    private void ExitFullscreen()
-    {
-        var tile = _fullscreenTile;
-        if (tile is null)
-        {
-            return;
-        }
-
-        _fullscreenTile = null;
-
-        FullscreenHost.Children.Remove(tile.Root);
-        FullscreenHost.Visibility = Visibility.Collapsed;
-
-        tile.Root.Margin = new Thickness(6);
-        tile.Root.CornerRadius = new CornerRadius(10);
-        tile.Root.BorderThickness = new Thickness(1);
-        tile.FullscreenButton.Content = "Tela cheia";
-
-        // Só volta pra grade se o participante ainda estiver na sala.
-        if (_tiles.ContainsKey(tile.Key))
-        {
-            TilesGrid.Children.Add(tile.Root);
-        }
-
-        WindowStyle = _previousWindowStyle;
-        ResizeMode = _previousResizeMode;
-        WindowState = _previousWindowState;
-
-        RelayoutTiles();
-        StatusText.Text = $"Saiu da tela cheia de {tile.Nickname}.";
-    }
-
-    private void OnWindowKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
-    {
-        if (e.Key == System.Windows.Input.Key.Escape && _fullscreenTile is not null)
-        {
-            ExitFullscreen();
-            e.Handled = true;
-        }
-    }
-
-    /// <summary>
-    /// Calcula um tamanho "médio" pros tiles em vez de deixá-los esticar. Antes, com uma pessoa
-    /// só compartilhando, o tile ocupava a área inteira e a imagem ficava desproporcional, com
-    /// tarjas pretas enormes. Agora os tiles mantêm 16:9, cabem todos na tela e têm um teto.
-    /// </summary>
-    private void RelayoutTiles()
-    {
-        var count = TilesGrid.Children.Count;
-        EmptyStateText.Visibility = count == 0 ? Visibility.Visible : Visibility.Collapsed;
-
-        if (count == 0)
-        {
-            return;
-        }
-
-        var availableWidth = TilesScroll.ViewportWidth > 10 ? TilesScroll.ViewportWidth : Math.Max(400, ActualWidth - 40);
-        var availableHeight = TilesScroll.ViewportHeight > 10 ? TilesScroll.ViewportHeight : Math.Max(300, ActualHeight - 220);
-
-        var columns = Math.Max(1, (int)Math.Ceiling(Math.Sqrt(count)));
-        var rows = (int)Math.Ceiling((double)count / columns);
-
-        const double tileMargin = 12; // 6 de cada lado
-        var widthLimit = (availableWidth / columns) - tileMargin;
-        var heightLimit = ((availableHeight / rows) - tileMargin) * 16.0 / 9.0;
-
-        var tileWidth = Math.Clamp(Math.Min(widthLimit, heightLimit), 320, 760);
-        var tileHeight = tileWidth * 9.0 / 16.0;
-
-        foreach (var tile in _tiles.Values)
-        {
-            if (tile == _fullscreenTile)
-            {
-                continue; // em tela cheia o tile ocupa tudo
-            }
-
-            tile.Root.Width = tileWidth;
-            tile.Root.Height = tileHeight;
         }
     }
 
@@ -1630,6 +1346,7 @@ public partial class RoomWindow : Window
     private void UpdateParticipantsPanel()
     {
         ParticipantsPanel.Items.Clear();
+        _speakingRings.Clear();
 
         foreach (var participant in _client.Participants)
         {
@@ -1637,36 +1354,7 @@ public partial class RoomWindow : Window
                             || (participant.Id == _client.ParticipantId && _isSharing);
             var isMe = participant.Id == _client.ParticipantId;
 
-            var dot = new System.Windows.Shapes.Ellipse
-            {
-                Width = 7,
-                Height = 7,
-                Margin = new Thickness(0, 0, 6, 0),
-                VerticalAlignment = VerticalAlignment.Center,
-                Fill = isSharing
-                    ? (Brush)FindResource("SuccessBrush")
-                    : (Brush)FindResource("TextMutedBrush"),
-            };
-
-            var name = new TextBlock
-            {
-                Text = isMe ? $"{participant.Nickname} (você)" : participant.Nickname,
-                FontSize = 11,
-                VerticalAlignment = VerticalAlignment.Center,
-                Foreground = (Brush)FindResource(isSharing ? "TextPrimaryBrush" : "TextSecondaryBrush"),
-            };
-
-            ParticipantsPanel.Items.Add(new Border
-            {
-                Background = (Brush)FindResource("Surface2Brush"),
-                BorderBrush = (Brush)FindResource("BorderBrush2"),
-                BorderThickness = new Thickness(1),
-                CornerRadius = new CornerRadius(10),
-                Padding = new Thickness(8, 3, 10, 3),
-                Margin = new Thickness(0, 0, 6, 4),
-                ToolTip = isSharing ? "Compartilhando a tela" : "Na sala",
-                Child = new StackPanel { Orientation = Orientation.Horizontal, Children = { dot, name } },
-            });
+            ParticipantsPanel.Items.Add(BuildParticipantChip(participant, isMe, isSharing));
         }
     }
 
@@ -1858,6 +1546,7 @@ public partial class RoomWindow : Window
     {
         var width = frame.Width;
         var height = frame.Height;
+        tile.SetPictureSize(width, height);
 
         if (frame.Format == FramePixelFormat.Bgra)
         {
@@ -1926,6 +1615,9 @@ public partial class RoomWindow : Window
         {
             var frames = Interlocked.Exchange(ref tile.FramesRendered, 0);
             var bytes = Interlocked.Exchange(ref tile.BytesReceived, 0);
+
+            UpdateTileQuality(tile, frames, bytes);
+            UpdateRecordingBadge(tile);
 
             if (tile.IsLocal)
             {
@@ -2008,7 +1700,23 @@ public partial class RoomWindow : Window
         }
 
         Clipboard.SetText(invite);
-        StatusText.Text = "Convite copiado para a área de transferência.";
+        ShowToast("Convite copiado. Cole pros seus amigos.", "");
+    }
+
+    /// <summary>Endereço que os outros usam pra entrar nesta sala.</summary>
+    private string InviteAddress => _ownedServer is not null
+        ? LocalNetworks.PreferredInviteAddress().Address
+        : _hostAddress;
+
+    private void OnCopyInviteLinkClick(object sender, RoutedEventArgs e)
+    {
+        Clipboard.SetText(InviteLink.Create(InviteAddress));
+        ShowToast("Link copiado. Quem clicar nele abre o MGRScreen direto nesta sala.", "");
+    }
+
+    private void OnStreamOptionsClick(object sender, RoutedEventArgs e)
+    {
+        StreamOptionsPopup.IsOpen = true;
     }
 
 
@@ -2021,9 +1729,12 @@ public partial class RoomWindow : Window
 
         foreach (var tile in _tiles.Values)
         {
+            StopRecording(tile, announce: false);
+            ClosePopOut(tile);
             tile.Dispose();
         }
         _tiles.Clear();
+        ShutdownExtras();
 
         StopCamera();
         _camera.Dispose();
@@ -2036,7 +1747,7 @@ public partial class RoomWindow : Window
     }
 
     /// <summary>Um "quadradinho" da grade: a imagem, o decoder daquele participante e o áudio dele.</summary>
-    private sealed class StreamTile : IDisposable
+    private sealed partial class StreamTile : IDisposable
     {
         /// <summary>Chave no dicionário de tiles: (participante, tela/câmera). Ver TileKey.</summary>
         public int Key { get; init; }
@@ -2092,12 +1803,17 @@ public partial class RoomWindow : Window
 
         public void UpdateToggleLabel()
         {
-            ToggleButton.Content = Watching
+            ToggleButton.Content = Watching ? "" : "";
+            ToggleButton.ToolTip = Watching
                 ? (IsLocal ? "Ocultar preview" : "Parar de assistir")
                 : (IsLocal ? "Mostrar preview" : "Assistir");
         }
 
-        public void UpdateMuteLabel() => MuteButton.Content = Muted ? "Ativar som" : "Silenciar";
+        public void UpdateMuteLabel()
+        {
+            MuteButton.Content = Muted ? "" : "";
+            MuteButton.ToolTip = Muted ? "Volume desta tela (está silenciada)" : "Volume desta tela";
+        }
 
         /// <summary>Para o vídeo. O áudio é do mixer, quem tira de lá é a janela.</summary>
         public void StopPlayback()

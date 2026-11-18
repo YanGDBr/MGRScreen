@@ -51,6 +51,23 @@ public sealed class ScreenCaptureService : IDisposable
     private volatile int _maxOutputHeight = 1080;
     public int MaxOutputHeight { get => _maxOutputHeight; set => _maxOutputHeight = value; }
 
+    /// <summary>
+    /// Retângulo (em pixels do que está sendo capturado) a transmitir, ou null pra tudo. Só vale
+    /// com a conversão na GPU; no caminho de reserva em BGRA a tela inteira é enviada.
+    /// </summary>
+    public (int X, int Y, int Width, int Height)? CropRegion
+    {
+        get => _cropRegion;
+        set => _cropRegion = value;
+    }
+
+    private volatile Tuple<int, int, int, int>? _cropBox;
+    private (int X, int Y, int Width, int Height)? _cropRegion
+    {
+        get => _cropBox is { } b ? (b.Item1, b.Item2, b.Item3, b.Item4) : null;
+        set => _cropBox = value is { } v ? Tuple.Create(v.X, v.Y, v.Width, v.Height) : null;
+    }
+
     /// <summary>Se a conversão na GPU falhar nesta máquina, a captura volta a entregar BGRA no
     /// tamanho original (o caminho antigo) e avisa por aqui o motivo, uma vez.</summary>
     public event Action<string>? GpuConversionUnavailable;
@@ -226,7 +243,17 @@ public sealed class ScreenCaptureService : IDisposable
 
         if (!_gpuConversionFailed)
         {
-            var (outWidth, outHeight) = SessionSettings.ScaleToHeight(width, height, MaxOutputHeight);
+            // Compartilhando só uma região: recorta dentro do que foi capturado (na GPU, de graça).
+            int cropX = 0, cropY = 0, cropWidth = width, cropHeight = height;
+            if (CropRegion is { } crop)
+            {
+                cropX = Math.Clamp(crop.X, 0, Math.Max(0, width - 2));
+                cropY = Math.Clamp(crop.Y, 0, Math.Max(0, height - 2));
+                cropWidth = Math.Clamp(crop.Width, 2, width - cropX);
+                cropHeight = Math.Clamp(crop.Height, 2, height - cropY);
+            }
+
+            var (outWidth, outHeight) = SessionSettings.ScaleToHeight(cropWidth, cropHeight, MaxOutputHeight);
             var converted = false;
             try
             {
@@ -237,7 +264,7 @@ public sealed class ScreenCaptureService : IDisposable
                 }
 
                 _converter ??= new GpuNv12Converter(_d3dDevice!, _d3dContext!);
-                _converter.Convert(sourceTexture, width, height, outWidth, outHeight, _nv12Buffer);
+                _converter.Convert(sourceTexture, cropX, cropY, cropWidth, cropHeight, outWidth, outHeight, _nv12Buffer);
                 converted = true;
             }
             catch (Exception ex) when (ex is not OutOfMemoryException)
@@ -256,8 +283,8 @@ public sealed class ScreenCaptureService : IDisposable
                     Width = outWidth,
                     Height = outHeight,
                     Format = FramePixelFormat.Nv12,
-                    SourceWidth = width,
-                    SourceHeight = height,
+                    SourceWidth = cropWidth,
+                    SourceHeight = cropHeight,
                 });
                 return;
             }

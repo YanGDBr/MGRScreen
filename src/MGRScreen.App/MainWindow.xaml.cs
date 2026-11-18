@@ -7,10 +7,17 @@ namespace MGRScreen.App;
 
 public partial class MainWindow : Window
 {
-    public const int ControlPort = 51900;
-    public const int MediaPort = 51901;
+    /// <summary>Portas da sala. Fixas em 51900/51901 pra todo mundo se encontrar; a variável de
+    /// ambiente MGRSCREEN_PORT_BASE só existe pra rodar testes ao lado de uma sala já aberta.</summary>
+    public static readonly int ControlPort = PortBase();
+    public static readonly int MediaPort = ControlPort + 1;
 
-    private readonly AppSettings _settings = AppSettings.Load();
+    private static int PortBase() =>
+        int.TryParse(Environment.GetEnvironmentVariable("MGRSCREEN_PORT_BASE"), out var port) && port is > 1024 and < 65000
+            ? port
+            : 51900;
+
+    private readonly AppSettings _settings = AppSettings.Current;
     private readonly CancellationTokenSource _scanCts = new();
 
     /// <summary>Assinatura do que está desenhado na lista. Só redesenho quando muda de verdade —
@@ -34,7 +41,15 @@ public partial class MainWindow : Window
             LastRoomAddressText.Text = _settings.LastRoomAddress;
         }
 
-        Loaded += async (_, _) => await ScanLoopAsync(_scanCts.Token);
+        Loaded += async (_, _) =>
+        {
+            if (OnOpened())
+            {
+                return; // já saiu daqui direto pra uma sala (link de convite)
+            }
+
+            await ScanLoopAsync(_scanCts.Token);
+        };
     }
 
     /// <summary>
@@ -150,11 +165,12 @@ public partial class MainWindow : Window
     private void OnCreateRoomClick(object sender, RoutedEventArgs e)
     {
         var nickname = GetNickname();
+        var password = RoomPasswordBox.Password.Length > 0 ? RoomPasswordBox.Password : null;
 
         RoomServer server;
         try
         {
-            server = new RoomServer(nickname, ControlPort, MediaPort);
+            server = new RoomServer(nickname, ControlPort, MediaPort, password);
             server.Start();
         }
         catch (Exception ex)
@@ -164,7 +180,7 @@ public partial class MainWindow : Window
         }
 
         // Quem cria a sala entra nela como um participante comum, conectando no próprio servidor.
-        OpenRoom(new RoomWindow(nickname, "127.0.0.1", server));
+        OpenRoom(new RoomWindow(nickname, "127.0.0.1", server, password: password));
     }
 
     private void OnJoinDiscoveredClick(object sender, RoutedEventArgs e)
@@ -186,7 +202,9 @@ public partial class MainWindow : Window
 
     private void OnJoinByAddressClick(object sender, RoutedEventArgs e)
     {
+        // Colaram um link de convite em vez do IP: vale o endereço de dentro dele.
         var address = HostAddressBox.Text.Trim();
+        address = InviteLink.TryParse(address)?.Address ?? address;
         if (string.IsNullOrWhiteSpace(address))
         {
             StatusText.Text = "Digite o IP do anfitrião.";

@@ -35,3 +35,23 @@ Os timestamps usam a origem monotônica do publicador. O timestamp do vídeo é 
 O formato do áudio vem na descrição da tela, incluindo canais e taxa de amostragem. As unidades de recuperação de vídeo trazem SPS/PPS antes das slices do IDR. Ao assinar ou se recuperar de congestionamento, o espectador espera por esse IDR. Mídia de gerações anteriores é ignorada.
 
 O servidor envia framing antigo a clientes desktop. Publicadores antigos não fornecem geração, unidades completas nem PTS e seus streams continuam disponíveis pelo caminho desktop.
+
+## Protocolo 3: senha, chat, anotações e voz
+
+Extensão compatível com o protocolo 2. O servidor só envia mensagens e mídia novas a quem entrou
+como v3; clientes v2 (Windows 1.0.x, Android) e legados continuam recebendo exatamente o de antes.
+
+- **Negociação.** O cliente novo manda `ProtocolVersion: 2` e `MaxProtocolVersion: 3` no Join. Um
+  servidor antigo ignora o campo novo e responde 2; o novo responde 3. (Mandar 3 direto faria o
+  servidor 1.0.x tratar o cliente como legado.) `RoomClient.SupportsRoomFeatures` diz o resultado.
+- **Senha.** Sala com senha manda `JoinChallenge` (Kind 16, `Nonce` de 32 bytes em Base64) e espera
+  `JoinAuth` (Kind 17, `Proof` = HMAC-SHA256 com a senha como chave sobre o nonce). A senha não
+  trafega; a comparação é em tempo constante. Cliente antigo recebe o `JoinRejected` de sempre.
+  A descoberta informa `RequiresPassword` só a quem pergunta como v3.
+- **Chat** (Kind 18). Cliente envia `Text` (até 2000 caracteres). O servidor carimba
+  `ParticipantId`, `Nickname` e `SentAtUnixMs` e entrega a todos os v3, inclusive ao remetente.
+- **Anotação** (Kind 19). `TargetParticipantId`, `StreamKind` e `Payload` opaco (até 16 KB),
+  repassados aos outros v3. Limite de 60 por segundo por participante. O app usa o payload pra
+  traços de desenho em coordenadas do vídeo.
+- **Voz.** Tipo de mídia 4, PCM 16-bit mono a 16 kHz, repassado aos outros v3 independentemente de
+  assinatura de stream. Fila cheia descarta.

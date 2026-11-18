@@ -18,9 +18,26 @@ public sealed class RoomClient : IDisposable
     public event Action<string, bool>? ViewerCongested;
     public event Action<int, StreamKind, byte[]>? VideoChunkReceived; // (participantId, tela/câmera, chunk)
     public event Action<int, byte[]>? AudioChunkReceived; // (participantId, pcm16)
+
+    /// <summary>Voz (microfone) de alguém: (participantId, pcm16 no <see cref="VoiceFormat"/>).</summary>
+    public event Action<int, byte[]>? VoiceChunkReceived;
+
+    /// <summary>Mensagem do chat — inclusive as minhas, que voltam do servidor como confirmação.</summary>
+    public event Action<ChatMessage>? ChatReceived;
+    public event Action<AnnotationMessage>? AnnotationReceived;
     public event Action<string>? Disconnected;
 
     public int ParticipantId { get; private set; }
+
+    /// <summary>
+    /// A sala fala o protocolo 3 (chat, anotações, voz). Fica false num anfitrião de versão
+    /// anterior: a entrada funciona igual, e os envios novos simplesmente não fazem nada.
+    /// </summary>
+    public bool SupportsRoomFeatures { get; private set; }
+
+    /// <summary>A última tentativa de entrar foi recusada por senha ausente ou errada — a
+    /// interface usa isto pra pedir a senha e tentar de novo.</summary>
+    public bool RejectedForPassword { get; private set; }
 
     /// <summary>Cópia da lista atual. É cópia de propósito: a lista é alterada pela thread de
     /// rede enquanto a UI a percorre pra desenhar os participantes.</summary>
@@ -63,8 +80,16 @@ public sealed class RoomClient : IDisposable
 
     /// <summary>Conecta e faz o handshake. Retorna null em caso de sucesso, ou a mensagem de
     /// rejeição em caso de falha.</summary>
-    public async Task<string?> ConnectAsync(string hostAddress, int controlPort, int mediaPort, string nickname)
+    public async Task<string?> ConnectAsync(string hostAddress, int controlPort, int mediaPort, string nickname,
+        string? password = null)
     {
+        RejectedForPassword = false;
+        SupportsRoomFeatures = false;
+
+        // Tentar de novo no mesmo objeto (depois de pedir a senha) não pode deixar a conexão
+        // recusada aberta.
+        _controlClient?.Dispose();
+
         _cts = new CancellationTokenSource();
         var token = _cts.Token;
         using var handshake = CancellationTokenSource.CreateLinkedTokenSource(token);
@@ -74,8 +99,11 @@ public sealed class RoomClient : IDisposable
         await _controlClient.ConnectAsync(hostAddress, controlPort, handshake.Token);
         _controlStream = _controlClient.GetStream();
 
+        // ProtocolVersion continua 2 de propósito, e a versão 3 vai em MaxProtocolVersion: um
+        // anfitrião 1.0.x só reconhece exatamente 2 (ver RoomEnvelope.MaxProtocolVersion).
         var join = RoomEnvelope.Join(nickname);
-        join.ProtocolVersion = 2;
+        join.ProtocolVersion = RoomFeatures.TimedMediaVersion;
+        join.MaxProtocolVersion = RoomFeatures.Version;
         await MessageFraming.WriteMessageAsync(_controlStream, join.ToJsonBytes(), handshake.Token);
 
         var responseBytes = await MessageFraming.ReadMessageAsync(_controlStream, handshake.Token);
@@ -85,14 +113,46 @@ public sealed class RoomClient : IDisposable
         }
 
         var response = RoomEnvelope.FromJsonBytes(responseBytes);
+
+        // Sala com senha: o servidor manda um nonce e espera o HMAC dele (a senha em si não
+        // trafega). Sem senha em mãos nem adianta responder — devolve já, pra interface perguntar.
+        if (response.Kind == RoomMessageKind.JoinChallenge)
+        {
+            if (string.IsNullOrEmpty(password))
+            {
+                RejectedForPassword = true;
+                _controlClient.Dispose();
+                return "Esta sala é protegida por senha.";
+            }
+
+            var nonce = new byte[64];
+            if (!Convert.TryFromBase64String(response.Nonce ?? "", nonce, out var nonceLength) || nonceLength == 0)
+                throw new InvalidDataException("Desafio de senha inválido.");
+            var proof = RoomFeatures.PasswordProof(password, nonce[..nonceLength]);
+            await MessageFraming.WriteMessageAsync(_controlStream, new RoomEnvelope
+            {
+                Kind = RoomMessageKind.JoinAuth,
+                Proof = Convert.ToBase64String(proof),
+            }.ToJsonBytes(), handshake.Token);
+
+            responseBytes = await MessageFraming.ReadMessageAsync(_controlStream, handshake.Token);
+            if (responseBytes is null)
+            {
+                return "A sala fechou a conexão sem responder.";
+            }
+            response = RoomEnvelope.FromJsonBytes(responseBytes);
+        }
+
         if (response.Kind == RoomMessageKind.JoinRejected)
         {
+            RejectedForPassword = response.RequiresPassword;
             return response.Reason ?? "Conexão rejeitada.";
         }
 
         if (response.Kind != RoomMessageKind.JoinAccepted)
             throw new InvalidDataException("Resposta da sala inválida.");
-        _timedMedia = response.ProtocolVersion == 2;
+        _timedMedia = response.ProtocolVersion >= RoomFeatures.TimedMediaVersion;
+        SupportsRoomFeatures = response.ProtocolVersion >= RoomFeatures.Version;
         ParticipantId = response.ParticipantId;
         lock (_participantsSync)
         {
@@ -172,6 +232,48 @@ public sealed class RoomClient : IDisposable
             ? TimedMedia.Frame(MediaChunkType.Audio, info.Generation, Interlocked.Increment(ref _sequence), pts, false, pcm16)
             : MediaFraming.Frame(MediaChunkType.Audio, 0, pcm16));
 
+    /// <summary>
+    /// Voz do microfone, no <see cref="VoiceFormat"/>. Como o áudio da tela, nunca é segurada
+    /// esperando keyframe; se o upload não está dando conta, o pedaço é descartado em vez de
+    /// atrasar a conversa. Não faz nada numa sala de versão anterior.
+    /// </summary>
+    public void SendVoiceChunk(byte[] pcm16, long ptsUs)
+    {
+        if (!SupportsRoomFeatures || pcm16.Length is 0 or > RoomFeatures.MaxVoiceChunkBytes)
+            return;
+        // Geração 0: a voz não pertence a nenhum stream anunciado.
+        _outgoing.TryEnqueue(TimedMedia.Frame(
+            MediaChunkType.Voice, 0, Interlocked.Increment(ref _sequence), ptsUs, false, pcm16));
+    }
+
+    /// <summary>
+    /// Manda uma mensagem no chat. Ela só aparece (pra mim também) quando volta do servidor em
+    /// <see cref="ChatReceived"/> — é o que confirma a entrega e mantém a ordem igual pra todos.
+    /// </summary>
+    public Task SendChatAsync(string text)
+    {
+        if (!SupportsRoomFeatures || string.IsNullOrWhiteSpace(text))
+            return Task.CompletedTask;
+        return SendControlAsync(new RoomEnvelope { Kind = RoomMessageKind.Chat, Text = RoomFeatures.ClampChat(text) });
+    }
+
+    /// <summary>
+    /// Desenho/ponteiro sobre o stream de alguém. O <paramref name="payload"/> é opaco pra rede
+    /// (a interface define o formato) e vai pros outros, não volta pra cá. Acima de 16 KB é ignorado.
+    /// </summary>
+    public Task SendAnnotationAsync(int targetParticipantId, StreamKind targetKind, string payload)
+    {
+        if (!SupportsRoomFeatures || !RoomFeatures.AnnotationFits(payload))
+            return Task.CompletedTask;
+        return SendControlAsync(new RoomEnvelope
+        {
+            Kind = RoomMessageKind.Annotation,
+            TargetParticipantId = targetParticipantId,
+            StreamKind = targetKind,
+            Payload = payload,
+        });
+    }
+
     private async Task SendControlAsync(RoomEnvelope message)
     {
         if (_controlStream is null)
@@ -247,6 +349,18 @@ public sealed class RoomClient : IDisposable
                             message.Nickname ?? "Um espectador",
                             message.ParticipantId == ParticipantId);
                         break;
+
+                    case RoomMessageKind.Chat when message.Text is not null:
+                        ChatReceived?.Invoke(new ChatMessage(
+                            message.ParticipantId, message.Nickname ?? "Amigo", message.Text,
+                            DateTimeOffset.FromUnixTimeMilliseconds(message.SentAtUnixMs).UtcDateTime));
+                        break;
+
+                    case RoomMessageKind.Annotation when message.Payload is not null:
+                        AnnotationReceived?.Invoke(new AnnotationMessage(
+                            message.ParticipantId, message.Nickname ?? "Amigo",
+                            message.TargetParticipantId, message.StreamKind, message.Payload));
+                        break;
                 }
             }
         }
@@ -296,6 +410,9 @@ public sealed class RoomClient : IDisposable
                         break;
                     case MediaChunkType.Audio:
                         AudioChunkReceived?.Invoke(publisherId, payload);
+                        break;
+                    case MediaChunkType.Voice:
+                        VoiceChunkReceived?.Invoke(publisherId, payload);
                         break;
                 }
             }

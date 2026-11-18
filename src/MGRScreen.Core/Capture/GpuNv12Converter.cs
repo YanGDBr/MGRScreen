@@ -20,7 +20,7 @@ internal sealed class GpuNv12Converter : IDisposable
     private const string Source = """
         Texture2D src : register(t0);
         SamplerState smp : register(s0);
-        cbuffer Params : register(b0) { float2 uvScale; float2 tap; };
+        cbuffer Params : register(b0) { float2 uvScale; float2 tap; float2 uvOffset; float2 unused; };
 
         struct VsOut { float4 pos : SV_Position; float2 uv : TEXCOORD0; };
 
@@ -29,7 +29,7 @@ internal sealed class GpuNv12Converter : IDisposable
             VsOut o;
             float2 t = float2((id << 1) & 2, id & 2);
             o.pos = float4(t * float2(2, -2) + float2(-1, 1), 0, 1);
-            o.uv = t * uvScale;
+            o.uv = uvOffset + t * uvScale;
             return o;
         }
 
@@ -59,7 +59,7 @@ internal sealed class GpuNv12Converter : IDisposable
     [StructLayout(LayoutKind.Sequential)]
     private struct Params
     {
-        public float UvScaleX, UvScaleY, TapX, TapY;
+        public float UvScaleX, UvScaleY, TapX, TapY, OffsetX, OffsetY, Unused0, Unused1;
     }
 
     private readonly ID3D11Device _device;
@@ -91,15 +91,15 @@ internal sealed class GpuNv12Converter : IDisposable
         _sampler = device.CreateSamplerState(new SamplerDescription(
             Filter.MinMagMipLinear, TextureAddressMode.Clamp, TextureAddressMode.Clamp, TextureAddressMode.Clamp));
         _rasterizer = device.CreateRasterizerState(new RasterizerDescription(CullMode.None, FillMode.Solid));
-        _params = device.CreateBuffer(new BufferDescription(16, BindFlags.ConstantBuffer));
+        _params = device.CreateBuffer(new BufferDescription(32, BindFlags.ConstantBuffer));
     }
 
     /// <summary>
-    /// Converte <paramref name="source"/> (só a região de conteúdo, que pode ser menor que a
-    /// textura durante um redimensionamento) para NV12 de <paramref name="width"/> x
+    /// Converte <paramref name="source"/> (só o retângulo de conteúdo: a textura pode ser maior
+    /// durante um redimensionamento, e ao compartilhar uma região só um pedaço dela interessa) para NV12 de <paramref name="width"/> x
     /// <paramref name="height"/> (pares) em <paramref name="destination"/>.
     /// </summary>
-    public unsafe void Convert(ID3D11Texture2D source, int contentWidth, int contentHeight, int width, int height, byte[] destination)
+    public unsafe void Convert(ID3D11Texture2D source, int contentX, int contentY, int contentWidth, int contentHeight, int width, int height, byte[] destination)
     {
         EnsureTargets(width, height);
 
@@ -133,6 +133,8 @@ internal sealed class GpuNv12Converter : IDisposable
 
         var scaleX = contentWidth / (float)description.Width;
         var scaleY = contentHeight / (float)description.Height;
+        var offsetX = contentX / (float)description.Width;
+        var offsetY = contentY / (float)description.Height;
         var reducing = width < contentWidth || height < contentHeight;
 
         _context.IASetInputLayout(null);
@@ -144,8 +146,8 @@ internal sealed class GpuNv12Converter : IDisposable
         _context.PSSetSampler(0, _sampler);
         _context.PSSetShaderResource(0, view);
 
-        Draw(_lumaShader, _lumaView!, width, height, scaleX, scaleY, reducing);
-        Draw(_chromaShader, _chromaView!, width / 2, height / 2, scaleX, scaleY, reducing);
+        Draw(_lumaShader, _lumaView!, width, height, scaleX, scaleY, offsetX, offsetY, reducing);
+        Draw(_chromaShader, _chromaView!, width / 2, height / 2, scaleX, scaleY, offsetX, offsetY, reducing);
 
         _context.OMSetRenderTargets(Array.Empty<ID3D11RenderTargetView>());
         _context.PSSetShaderResource(0, null!);
@@ -161,7 +163,7 @@ internal sealed class GpuNv12Converter : IDisposable
     }
 
     private void Draw(ID3D11PixelShader shader, ID3D11RenderTargetView target, int width, int height,
-        float scaleX, float scaleY, bool reducing)
+        float scaleX, float scaleY, float offsetX, float offsetY, bool reducing)
     {
         var parameters = new Params
         {
@@ -169,6 +171,8 @@ internal sealed class GpuNv12Converter : IDisposable
             UvScaleY = scaleY,
             TapX = reducing ? 0.25f * scaleX / width : 0,
             TapY = reducing ? 0.25f * scaleY / height : 0,
+            OffsetX = offsetX,
+            OffsetY = offsetY,
         };
         _context.UpdateSubresource(in parameters, _params);
         _context.PSSetShader(shader);

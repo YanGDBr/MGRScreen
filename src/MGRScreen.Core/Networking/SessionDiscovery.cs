@@ -18,6 +18,10 @@ public sealed class DiscoveredSession
     /// <summary>Por onde ela apareceu: "Rede local", "Tailscale", "Radmin VPN"...</summary>
     public string NetworkLabel { get; set; } = "";
 
+    /// <summary>A sala pede senha pra entrar. Fica false quando o anfitrião é de uma versão
+    /// anterior (que não tem senha).</summary>
+    public bool RequiresPassword { get; set; }
+
     public string Key => $"{Address}:{ControlPort}";
 }
 
@@ -29,12 +33,22 @@ internal sealed class SessionAnnouncement
     public int ControlPort { get; set; }
     public int MediaPort { get; set; }
     public int ParticipantCount { get; set; }
+
+    /// <summary>Só aparece no JSON quando é true, e só na resposta a quem perguntou com
+    /// <see cref="SessionDiscovery.ProbeMagicV3"/> — os outros recebem a resposta de sempre.</summary>
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingDefault)]
+    public bool RequiresPassword { get; set; }
 }
 
 internal static class SessionDiscovery
 {
     public const int DiscoveryPort = 51902;
     public const string ProbeMagic = "MGRSCREEN-PROBE-1";
+
+    // A pergunta do protocolo 3 é a antiga com um sufixo. Os anfitriões antigos conferem só o
+    // começo do texto, então continuam respondendo; os novos veem o sufixo e sabem que quem
+    // perguntou entende o campo RequiresPassword.
+    public const string ProbeMagicV3 = ProbeMagic + ";3";
     public const string ReplyMagic = "MGRSCREEN-ROOM-1";
     public const string TailscaleMagic = "MGRSCREEN-ROOM-PUSH-1";
 
@@ -106,8 +120,12 @@ public sealed class SessionBeacon : IDisposable
     private UdpClient? _udp;
     private CancellationTokenSource? _cts;
 
-    public SessionBeacon(string hostNickname, int controlPort, int mediaPort, Func<int> participantCount)
+    private readonly bool _requiresPassword;
+
+    public SessionBeacon(string hostNickname, int controlPort, int mediaPort, Func<int> participantCount,
+        bool requiresPassword = false)
     {
+        _requiresPassword = requiresPassword;
         _hostNickname = hostNickname;
         _controlPort = controlPort;
         _mediaPort = mediaPort;
@@ -147,6 +165,8 @@ public sealed class SessionBeacon : IDisposable
                     ControlPort = _controlPort,
                     MediaPort = _mediaPort,
                     ParticipantCount = _participantCount(),
+                    RequiresPassword = _requiresPassword &&
+                        text.StartsWith(SessionDiscovery.ProbeMagicV3, StringComparison.Ordinal),
                 });
 
                 await _udp.SendAsync(reply, received.RemoteEndPoint, token);
@@ -333,7 +353,7 @@ public static class SessionBrowser
             udp.Client.Bind(new IPEndPoint(IPAddress.Any, 0));
 
             var collecting = CollectRepliesAsync(udp, found, token);
-            var probe = System.Text.Encoding.UTF8.GetBytes(SessionDiscovery.ProbeMagic);
+            var probe = System.Text.Encoding.UTF8.GetBytes(SessionDiscovery.ProbeMagicV3);
 
             foreach (var target in LocalNetworks.BroadcastAddresses())
             {
@@ -400,8 +420,13 @@ public static class SessionBrowser
             await client.ConnectAsync(address, controlPort, token);
 
             var stream = client.GetStream();
-            await MessageFraming.WriteMessageAsync(
-                stream, new RoomEnvelope { Kind = RoomMessageKind.Discover }.ToJsonBytes(), token);
+            // Anuncia a versão na pergunta: só assim o anfitrião novo conta se a sala tem senha.
+            // O antigo ignora o campo e responde como sempre.
+            await MessageFraming.WriteMessageAsync(stream, new RoomEnvelope
+            {
+                Kind = RoomMessageKind.Discover,
+                ProtocolVersion = RoomFeatures.Version,
+            }.ToJsonBytes(), token);
 
             var bytes = await MessageFraming.ReadMessageAsync(stream, token);
             if (bytes is null)
@@ -429,6 +454,7 @@ public static class SessionBrowser
                 ControlPort = controlPort,
                 MediaPort = mediaPort,
                 ParticipantCount = reply.ParticipantCount,
+                RequiresPassword = reply.RequiresPassword,
                 NetworkLabel = IPAddress.TryParse(address, out var parsed)
                     ? LocalNetworks.LabelFor(parsed)
                     : "Internet",
@@ -480,6 +506,7 @@ public static class SessionBrowser
                     ControlPort = announcement.ControlPort,
                     MediaPort = announcement.MediaPort,
                     ParticipantCount = announcement.ParticipantCount,
+                    RequiresPassword = announcement.RequiresPassword,
                     NetworkLabel = LocalNetworks.LabelFor(address),
                 };
 
