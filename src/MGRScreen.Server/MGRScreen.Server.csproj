@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Servidor de sala sozinho, sem interface: pra rodar numa VPS (Linux ou Windows) e todo
+       mundo entrar nela pelo endereço, sem depender do upload de quem criaria a sala em casa.
+
+       Usa os MESMOS arquivos de rede do app (pasta Networking do Core), compilados aqui dentro.
+       O Core em si não serve como referência: ele mira o Windows por causa da captura de tela. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <AssemblyName>mgrscreen-server</AssemblyName>
+    <RootNamespace>MGRScreen.Server</RootNamespace>
+    <Version>1.1.0</Version>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\MGRScreen.Core\Networking\*.cs" LinkBase="Networking" />
+  </ItemGroup>
+
+</Project>

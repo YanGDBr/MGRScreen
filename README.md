@@ -20,7 +20,7 @@ Encontre todos os arquivos na [release v1.1.0](https://github.com/YanGDBr/MGRScr
 - **Windows x64, portátil** — baixe o [ZIP portátil](https://github.com/YanGDBr/MGRScreen/releases/download/v1.1.0/MGRScreen-1.1.0-windows-x64.zip), extraia a pasta inteira e abra `MGRScreen.exe`. Os dois pacotes Windows já incluem FFmpeg e .NET.
 - **Android 10+** — instale o [APK](https://github.com/YanGDBr/MGRScreen/releases/download/v1.1.0/MGRScreen-Viewer-1.0.0.apk), informe um apelido e escolha uma sala para assistir. O player tem tela cheia, orientação e controles de volume.
 
-Use a mesma rede local ou conecte os dispositivos ao Tailscale. As salas aparecem na busca automática e também podem ser abertas pelo IP ou nome do anfitrião. [Guia do Android](docs/ANDROID_VIEWER.md)
+Use a mesma rede local ou conecte os dispositivos ao Tailscale. As salas aparecem na busca automática e também podem ser abertas pelo IP ou nome do anfitrião. [Guia do Android](docs/ANDROID_VIEWER.md) · [Hospedar a sala numa VPS](docs/VPS.md)
 
 ## Desenvolvimento
 
