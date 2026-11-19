@@ -7,7 +7,7 @@
     <Platforms>x64</Platforms>
     <RootNamespace>MGRScreen.App</RootNamespace>
     <AssemblyName>MGRScreen</AssemblyName>
-    <Version>1.1.0</Version>
+    <Version>1.1.1</Version>
     <UseWPF>true</UseWPF>
     <!-- Só pelo NotifyIcon (ícone na bandeja), que o WPF não tem. -->
     <UseWindowsForms>true</UseWindowsForms>

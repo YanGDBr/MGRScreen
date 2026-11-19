@@ -796,9 +796,13 @@ public partial class RoomWindow
         TilesGrid.Children.Add(tile.Root);
         RelayoutTiles();
 
-        // A tela voltou pra sala, então a sala vem pra frente (e sai da bandeja, se estava lá).
-        // Sem isso ela ficava atrás das outras janelas e parecia que a tela tinha sumido.
-        RestoreFromTray();
+        // A tela voltou pra sala, então a sala vem pra frente. Sem isso ela ficava atrás das
+        // outras janelas e parecia que a tela tinha sumido. (Indo pra segundo plano as janelas
+        // destacadas também fecham, e aí a sala NÃO deve reaparecer.)
+        if (!_backgroundMode)
+        {
+            RestoreFromTray();
+        }
     }
 
     private sealed partial class StreamTile

@@ -57,25 +57,12 @@ public partial class RoomWindow
         _tray.StopSharingRequested += StopSharing;
         _tray.ExitRequested += () =>
         {
-            RestoreFromTray();
+            // "Sair" na bandeja é fechar de vez, sem perguntar de novo.
+            _leaving = true;
             Close();
         };
 
-        StateChanged += (_, _) =>
-        {
-            // Minimizar esconde a janela e deixa só o ícone perto do relógio. A sala (e a
-            // transmissão) continua rodando normalmente.
-            if (WindowState == WindowState.Minimized && _settings.MinimizeToTray && _fullscreenTile is null)
-            {
-                Hide();
-                if (!_trayNoticeShown)
-                {
-                    _trayNoticeShown = true;
-                    _tray?.ShowBalloon("MGRScreen continua aberto", "A sala está na bandeja, perto do relógio. Clique duas vezes no ícone pra voltar.");
-                }
-            }
-        };
-
+        _appliedVideoProcessing = _settings.VideoProcessing;
         _hotkeys = new GlobalHotkeys(this);
         ApplyHotkeys();
         AppSettings.Changed += OnSettingsChanged;
@@ -115,10 +102,168 @@ public partial class RoomWindow
     {
         ApplyHotkeys();
         ApplyVoiceSettings();
+        ApplyVideoProcessing();
     }
 
+    // ---------------------------------------------------------------- placa de vídeo x processador
+
+    private int _appliedVideoProcessing;
+
+    /// <summary>Preferência das configurações: codificar e decodificar no processador, mesmo
+    /// havendo placa de vídeo. A conversão de cor da captura continua na placa de qualquer jeito
+    /// (no processador ela custaria mais do que tudo o que esta opção economiza).</summary>
+    private bool PreferCpu => _settings.VideoProcessing == 1;
+
+    /// <summary>A opção mudou com a sala aberta: vale na hora, reiniciando o que estiver rodando.</summary>
+    private void ApplyVideoProcessing()
+    {
+        if (_appliedVideoProcessing == _settings.VideoProcessing)
+        {
+            return;
+        }
+
+        _appliedVideoProcessing = _settings.VideoProcessing;
+
+        if (_isSharing)
+        {
+            RestartStreamingWithCurrentQuality();
+        }
+
+        if (_cameraActive && _cameraWidth > 0)
+        {
+            RestartCameraStreaming(_cameraWidth, _cameraHeight);
+        }
+
+        if (!_backgroundMode)
+        {
+            foreach (var tile in _tiles.Values.Where(t => !t.IsLocal && t.Watching && t.Decoder is not null))
+            {
+                PauseVideo(tile);
+                StartWatching(tile);
+            }
+        }
+
+        ShowToast(PreferCpu
+            ? "Vídeo agora é processado no processador (CPU)."
+            : "Vídeo agora é processado na placa de vídeo, quando disponível.", "");
+    }
+
+    // ---------------------------------------------------------------- fechar x segundo plano
+
+    private enum CloseChoice { Cancel, Background, Close }
+
+    private bool _backgroundMode;
+
+    /// <summary>
+    /// O X da janela não some mais com o app sem avisar, nem fecha tudo sem perguntar: a pessoa
+    /// escolhe entre fechar de vez e deixar em segundo plano (e pode mandar lembrar a escolha).
+    /// </summary>
+    private CloseChoice AskCloseChoice()
+    {
+        // Ainda nem entrou na sala (sem bandeja): não há o que deixar em segundo plano.
+        if (_tray is null)
+        {
+            return CloseChoice.Close;
+        }
+
+        var warning = _isSharing
+            ? "Você está compartilhando a tela: fechar de vez interrompe a transmissão pra todo mundo."
+            : _ownedServer is not null && _client.Participants.Count > 1
+                ? "Você é o anfitrião: fechar de vez encerra a sala pra todo mundo."
+                : null;
+
+        switch (_settings.CloseBehavior)
+        {
+            case 1:
+                return CloseChoice.Background;
+
+            case 2 when warning is null:
+                return CloseChoice.Close;
+
+            case 2:
+                // Mesmo com "sempre fechar", derrubar a sala dos outros merece uma confirmação.
+                return MessageBox.Show(this, warning + " Fechar mesmo assim?", "Fechar o MGRScreen",
+                    MessageBoxButton.YesNo, MessageBoxImage.Question) == MessageBoxResult.Yes
+                    ? CloseChoice.Close
+                    : CloseChoice.Cancel;
+        }
+
+        var (choice, remember) = CloseChoiceDialog.Ask(this, warning);
+        if (remember && choice != CloseChoice.Cancel)
+        {
+            _settings.CloseBehavior = choice == CloseChoice.Background ? 1 : 2;
+            _settings.Save();
+        }
+
+        return choice;
+    }
+
+    /// <summary>
+    /// Some da barra de tarefas e fica só no ícone perto do relógio, gastando o mínimo: para de
+    /// decodificar e desenhar o vídeo dos outros, que é o que mais pesa em quem assiste. O que
+    /// os outros dependem de você continua: a sua transmissão, o áudio, a voz e o chat.
+    /// </summary>
+    private void EnterBackground()
+    {
+        if (_backgroundMode)
+        {
+            return;
+        }
+
+        _backgroundMode = true;
+
+        if (_fullscreenTile is not null)
+        {
+            ExitFullscreen();
+        }
+
+        foreach (var tile in _tiles.Values)
+        {
+            ClosePopOut(tile);
+
+            if (!tile.IsLocal && tile.Decoder is not null)
+            {
+                PauseVideo(tile);
+            }
+            else if (tile.IsLocal)
+            {
+                tile.ClearQueuedFrames(); // o preview da própria tela também para
+            }
+        }
+
+        CompositionTarget.Rendering -= OnCompositionRendering;
+        Hide();
+
+        if (!_trayNoticeShown)
+        {
+            _trayNoticeShown = true;
+            _tray?.ShowBalloon("MGRScreen em segundo plano",
+                "A sala continua aberta no ícone perto do relógio. Clique duas vezes nele pra voltar, ou com o botão direito pra sair.");
+        }
+    }
+
+    /// <summary>Para o decoder daquela tela sem "parar de assistir": o áudio dela continua e o
+    /// vídeo volta sozinho ao reabrir a janela.</summary>
+    private static void PauseVideo(StreamTile tile)
+    {
+        tile.StopPlayback();
+        tile.ClearQueuedFrames();
+    }
+
+    /// <summary>Traz a sala de volta pra frente; se estava em segundo plano, religa o vídeo.</summary>
     private void RestoreFromTray()
     {
+        if (_backgroundMode)
+        {
+            _backgroundMode = false;
+            CompositionTarget.Rendering += OnCompositionRendering;
+
+            foreach (var tile in _tiles.Values.Where(t => !t.IsLocal && t.Watching && t.Decoder is null))
+            {
+                StartWatching(tile);
+            }
+        }
+
         Show();
         if (WindowState == WindowState.Minimized)
         {

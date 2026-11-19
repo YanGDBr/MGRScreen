@@ -37,6 +37,7 @@ public sealed class SettingsWindow : Window
 
         content.Children.Add(Card("APARÊNCIA", BuildAppearance()));
         content.Children.Add(Card("GERAL", BuildGeneral()));
+        content.Children.Add(Card("DESEMPENHO DO VÍDEO", BuildPerformance()));
         content.Children.Add(Card("VOZ", BuildVoice()));
         content.Children.Add(Card("ATALHOS (funcionam com o app em segundo plano)", BuildHotkeys()));
         content.Children.Add(Card("PASTAS", BuildFolders()));
@@ -180,13 +181,54 @@ public sealed class SettingsWindow : Window
             return box;
         }
 
+        var close = new ComboBox { Margin = new Thickness(0, 0, 0, 14) };
+        close.Items.Add(new ComboBoxItem { Content = "Perguntar o que fazer" });
+        close.Items.Add(new ComboBoxItem { Content = "Manter em segundo plano (ícone perto do relógio)" });
+        close.Items.Add(new ComboBoxItem { Content = "Fechar de vez" });
+        close.SelectedIndex = Math.Clamp(_settings.CloseBehavior, 0, 2);
+        close.SelectionChanged += (_, _) =>
+        {
+            _settings.CloseBehavior = close.SelectedIndex;
+            Commit();
+        };
+
         return new StackPanel
         {
             Children =
             {
-                Option("Ao minimizar, ficar só no ícone perto do relógio", _settings.MinimizeToTray, v => _settings.MinimizeToTray = v),
+                new TextBlock { Text = "Ao fechar a janela da sala", Style = Res<Style>("LabelTextStyle") },
+                close,
                 Option("Avisar quando alguém entra, compartilha ou manda mensagem", _settings.Notifications, v => _settings.Notifications = v),
                 Option("Avisar quando houver versão nova", _settings.CheckUpdates, v => _settings.CheckUpdates = v),
+            },
+        };
+    }
+
+    // ---------------------------------------------------------------- desempenho
+
+    private UIElement BuildPerformance()
+    {
+        var mode = new ComboBox();
+        mode.Items.Add(new ComboBoxItem { Content = "Placa de vídeo (recomendado)" });
+        mode.Items.Add(new ComboBoxItem { Content = "Processador (CPU)" });
+        mode.SelectedIndex = Math.Clamp(_settings.VideoProcessing, 0, 1);
+        mode.SelectionChanged += (_, _) =>
+        {
+            _settings.VideoProcessing = mode.SelectedIndex;
+            Commit();
+        };
+
+        return new StackPanel
+        {
+            Children =
+            {
+                new TextBlock { Text = "Quem codifica e decodifica o vídeo", Style = Res<Style>("LabelTextStyle") },
+                mode,
+                Hint("A placa de vídeo é a melhor escolha pra quase todo mundo: ela tem um circuito só pra vídeo, "
+                   + "que quase não disputa com o jogo. Troque pro processador se a transmissão trava quando o jogo "
+                   + "usa a placa no limite, se a placa é antiga ou integrada e a imagem sai ruim, ou se o encoder "
+                   + "dela falha. No processador, transmitir em 1080p60 ocupa por volta de meio núcleo a mais."),
+                Hint("Vale na hora, inclusive com a sala aberta (a transmissão dá uma engasgada de um segundo)."),
             },
         };
     }

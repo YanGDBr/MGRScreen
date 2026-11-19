@@ -125,9 +125,21 @@ public partial class RoomWindow : Window
 
     private void OnWindowClosing(object? sender, System.ComponentModel.CancelEventArgs e)
     {
-        if (!_leaving && !ConfirmLeavingWhileSharing())
+        if (_leaving)
         {
-            e.Cancel = true;
+            return; // saída já confirmada (botão "Sair", item da bandeja)
+        }
+
+        switch (AskCloseChoice())
+        {
+            case CloseChoice.Cancel:
+                e.Cancel = true;
+                break;
+
+            case CloseChoice.Background:
+                e.Cancel = true;
+                EnterBackground();
+                break;
         }
     }
 
@@ -521,7 +533,7 @@ public partial class RoomWindow : Window
             _lastCapturedFrameWasBlack = IsMostlyBlack(frame.Data, width, height, format);
         }
 
-        if (_tiles.TryGetValue(LocalTileId, out var tile) && tile.Watching)
+        if (!_backgroundMode && _tiles.TryGetValue(LocalTileId, out var tile) && tile.Watching)
         {
             PushFrameToTile(tile, frame.Data, width, height, format);
         }
@@ -600,7 +612,7 @@ public partial class RoomWindow : Window
             OutputHeight = outHeight,
             Fps = fps,
             VideoBitrateKbps = bitrate,
-            VideoEncoder = _encoderFallbackUsed ? "libx264" : _bestEncoder,
+            VideoEncoder = _encoderFallbackUsed || PreferCpu ? "libx264" : _bestEncoder,
         };
 
         var hasAudio = _isSharing || StartAudioCapture();
@@ -949,7 +961,7 @@ public partial class RoomWindow : Window
             encoder.SubmitFrame(frame.Data);
         }
 
-        if (_tiles.TryGetValue(LocalCameraTileId, out var tile) && tile.Watching)
+        if (!_backgroundMode && _tiles.TryGetValue(LocalCameraTileId, out var tile) && tile.Watching)
         {
             PushFrameToTile(tile, frame.Data, frame.Width, frame.Height, frame.Format);
         }
@@ -974,7 +986,7 @@ public partial class RoomWindow : Window
             OutputHeight = outHeight,
             Fps = 30,
             VideoBitrateKbps = outHeight >= 720 ? 2_000 : 1_200,
-            VideoEncoder = _cameraEncoderFallbackUsed ? "libx264" : _bestEncoder,
+            VideoEncoder = _cameraEncoderFallbackUsed || PreferCpu ? "libx264" : _bestEncoder,
         };
 
         _cameraWidth = width;
@@ -1075,6 +1087,10 @@ public partial class RoomWindow : Window
 
         var tile = AddTile(key, info.ParticipantId, info.Kind, info.Nickname, info.Width, info.Height, info: info);
         StartWatching(tile);
+        if (_backgroundMode)
+        {
+            PauseVideo(tile); // em segundo plano ninguém está olhando: não decodifica
+        }
 
         StatusText.Text = info.Kind == StreamKind.Camera
             ? $"{info.Nickname} ligou a câmera."
@@ -1094,7 +1110,7 @@ public partial class RoomWindow : Window
         }
 
         var info = tile.Info;
-        var decoder = new FfmpegDecoder(info.Width, info.Height, _ffmpegPath);
+        var decoder = new FfmpegDecoder(info.Width, info.Height, _ffmpegPath, useHardwareDecode: !PreferCpu);
         decoder.FrameDecoded += frame =>
         {
             if (ReferenceEquals(tile.Decoder, decoder))
@@ -1822,6 +1838,21 @@ public partial class RoomWindow : Window
             Decoder = null;
             if (decoder is not null)
                 _ = decoder.StopAsync();
+        }
+
+        /// <summary>Joga fora os frames que ainda esperavam a vez de ir pra tela.</summary>
+        public void ClearQueuedFrames()
+        {
+            lock (Sync)
+            {
+                while (Frames.Count > 0)
+                {
+                    Pool.Push(Frames.Dequeue());
+                }
+
+                LastPresentTicks = 0;
+                BehindSinceTicks = 0;
+            }
         }
 
         /// <summary>Solta os bitmaps e os frames guardados (UI thread).</summary>

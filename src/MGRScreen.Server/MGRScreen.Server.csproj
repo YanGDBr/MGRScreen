@@ -10,7 +10,7 @@
     <TargetFramework>net8.0</TargetFramework>
     <AssemblyName>mgrscreen-server</AssemblyName>
     <RootNamespace>MGRScreen.Server</RootNamespace>
-    <Version>1.1.0</Version>
+    <Version>1.1.1</Version>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <InvariantGlobalization>true</InvariantGlobalization>

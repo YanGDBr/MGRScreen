@@ -58,7 +58,13 @@ public sealed class AppSettings
 
     // ---------------------------------------------------------------- comportamento
 
-    public bool MinimizeToTray { get; set; } = true;
+    /// <summary>O que o X da sala faz: 0 = perguntar · 1 = manter em segundo plano (bandeja) ·
+    /// 2 = fechar de vez.</summary>
+    public int CloseBehavior { get; set; }
+
+    /// <summary>Quem codifica e decodifica o vídeo: 0 = placa de vídeo (quando disponível) ·
+    /// 1 = processador.</summary>
+    public int VideoProcessing { get; set; }
     public bool Notifications { get; set; } = true;
     public bool CheckUpdates { get; set; } = true;
 
